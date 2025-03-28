@@ -41,16 +41,16 @@ An jupyter notebook example for the `LQR` module is provided [here](examples/ilq
 
 The implementations contained herein are copyright (C) 2024 - 2025 by Max Muchen Sun, and are distributed under the terms of the GNU General Public License (GPL) version 3 (or later). Please see the LICENSE for more information.
 
-If you use the sandbox in your research, please cite this repository. You can see the citation information at the right side panel under "About". The BibTeX file is attached below:
+If you use the package in your research, please cite this repository. You can see the citation information at the right side panel under "About". The BibTeX file is attached below:
 ```
 @software{sun_lqrax_2025,
-author = {["Sun"], Max Muchen},
-license = {GPL-3.0},
-month = march,
-title = {{lqrax: JAX-enabled continuous-time LQR solver}},
-url = {https://github.com/MaxMSun/lqrax},
-version = {0.0.1},
-year = {2025}
+    author = {["Sun"], Max Muchen},
+    license = {GPL-3.0},
+    month = march,
+    title = {{lqrax: JAX-enabled continuous-time LQR solver}},
+    url = {https://github.com/MaxMSun/lqrax},
+    version = {0.0.1},
+    year = {2025}
 }
 ```
 

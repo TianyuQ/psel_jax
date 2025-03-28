@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: [Sun]
+    given-names: [Max Muchen]
+    orcid: [0000-0002-3704-6315]
+title: "lqrax: JAX-Enabled continuous-time LQR solver"
+version: "0.0.1"
+date-released: 2025-03-28
+url: "https://github.com/MaxMSun/lqrax"
+repository-code: "https://github.com/MaxMSun/lqrax"
+license: "GPL-3.0"
+keywords:
+  - optimal control
