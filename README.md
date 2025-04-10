@@ -3,11 +3,7 @@ JAX-enabled continuous-time LQR solver.
 
 This repo is under active development.
 
-<div style="text-align: left;">
-  <video width="500" controls>
-    <source src="https://github.com/MaxMSun/lqrax/raw/refs/heads/main/media/drone_landing.mp4" type="video/mp4">
-  </video>
-</div>
+<img src="media/drone_landing.gif" alt="2d drone landing example (ilqr)" width="600"/>
 
 ## Install
 
