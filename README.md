@@ -38,8 +38,9 @@ $$
 This formulation is often used as the sub-problem for iterative linear quadratic regulator (iLQR) to calculate the steepest descent direction on the control for a general nonlinear control problem:
 
 $$
-\arg\min_{u(t)} \int_0^T l(x(t), u(t)) dt, \quad \text{s.t. } \dot{x}(t) = f(x(t), u(t)),
+\arg\min_{u(t)} \int_0^T l(x(t), u(t)) dt, \text{ s.t. } \dot{x}(t) = f(x(t), u(t)),
 $$ 
+
 where the $z(t)$ and $v(t)$ are perturbations on the system's state $x(t)$ and control $u(t)$, and $A(t)$ and $B(t)$ are the linearized system dynamics $f(x(t), u(t))$ on the current system trajectory with respect to the state and control. 
 
 An jupyter notebook example of using the `iLQR` module for a nonlinear control problem is provided [here](examples/ilqr_example.ipynb). You can open it in Google Colab [here](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb).
