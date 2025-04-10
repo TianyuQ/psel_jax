@@ -3,6 +3,12 @@ JAX-enabled continuous-time LQR solver.
 
 This repo is under active development.
 
+<div style="text-align: left;">
+  <video width="500" controls>
+    <source src="media/drone_landing.mp4" type="video/mp4">
+  </video>
+</div>
+
 ## Install
 
 Follow the [instructions](https://github.com/jax-ml/jax?tab=readme-ov-file#installation) to install JAX before installing this package.
