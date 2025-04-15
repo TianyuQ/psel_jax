@@ -1,5 +1,5 @@
 <div align="center">
-<img src="media/lqrax_logo.png" alt="logo" width="100"></img>
+<img src="media/lqrax_logo.png" alt="logo" width="150"></img>
 </div>
 
 # lqrax
