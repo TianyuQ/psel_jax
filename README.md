@@ -2,8 +2,8 @@
 <img src="media/lqrax_logo.png" alt="logo" width="150"></img>
 </div>
 
-# lqrax
-Lqrax is [JAX](https://github.com/jax-ml/jax)-enabled continuous-time LQR solver. It is essentially a Riccati equation solver completely written in JAX:
+# LQRax
+LQRax is [JAX](https://github.com/jax-ml/jax)-enabled continuous-time LQR solver. It is essentially a Riccati equation solver completely written in JAX:
 
 - It accelerates numerical simulation through JAX's [`scan`](https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html) mechanism;
 - It allows rapid prototyping of iterative LQR (iLQR) for nonlinear control by supporting [auto-differentiation](https://docs.jax.dev/en/latest/automatic-differentiation.html) on the loss function and dynamics;
@@ -63,7 +63,7 @@ If you use the package in your research, please cite this repository. You can se
     author = {["Sun"], Max Muchen},
     license = {GPL-3.0},
     month = march,
-    title = {{lqrax: JAX-enabled continuous-time LQR solver}},
+    title = {{LQRax: JAX-enabled continuous-time LQR solver}},
     url = {https://github.com/MaxMSun/lqrax},
     version = {0.0.1},
     year = {2025}
