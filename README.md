@@ -1,3 +1,7 @@
+<div align="center">
+<img src="media/lqrax_logo.png" alt="logo" width="100"></img>
+</div>
+
 # lqrax
 Lqrax is [JAX](https://github.com/jax-ml/jax)-enabled continuous-time LQR solver. It is essentially a Riccati equation solver completely written in JAX:
 
