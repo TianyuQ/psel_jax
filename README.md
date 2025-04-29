@@ -68,7 +68,7 @@ If you use the package in your research, please cite this repository. You can se
     month = march,
     title = {{LQRax: JAX-enabled continuous-time LQR solver}},
     url = {https://github.com/MaxMSun/lqrax},
-    version = {0.0.4},
+    version = {0.0.5},
     year = {2025}
 }
 ```

@@ -54,7 +54,7 @@ class LQR:
         x_traj = self.dyn_scan(x0, u_traj)
         A_traj = vmap(self.dfdx, in_axes=(0,0))(x_traj, u_traj)
         B_traj = vmap(self.dfdu, in_axes=(0,0))(x_traj, u_traj)
-        return A_traj, B_traj
+        return x_traj, A_traj, B_traj
     
     def P_dyn_rev(self, Pt, At, Bt):
         return Pt @ At + At.T @ Pt - Pt @ Bt @ self.R_inv @ Bt.T @ Pt + self.Q 
