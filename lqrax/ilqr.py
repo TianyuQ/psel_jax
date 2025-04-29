@@ -25,13 +25,8 @@ class iLQR:
 
         self._dfdx = jacfwd(self.dyn, argnums=0)
         self._dfdu = jacfwd(self.dyn, argnums=1)
-        self._dldx = grad(self.loss, argnums=0)
-        self._dldu = grad(self.loss, argnums=1)
 
     def dyn(self, xt, ut):
-        raise NotImplementedError("Dynamics function f(xt, ut) not implemented.")
-    
-    def loss(self, xt, ut):
         raise NotImplementedError("Dynamics function f(xt, ut) not implemented.")
     
     def dyn_step(self, xt, ut):
@@ -53,25 +48,12 @@ class iLQR:
     def dfdu(self, xt, ut):
         return self._dfdu(xt, ut)
     
-    def dldx(self, xt, ut):
-        return self._dldx(xt, ut)
-    
-    def dldu(self, xt, ut):
-        return self._dldu(xt, ut)
-    
     @partial(jit, static_argnums=(0,))
     def linearize_dyn(self, x0, u_traj):
         x_traj = self.dyn_scan(x0, u_traj)
         A_traj = vmap(self.dfdx, in_axes=(0,0))(x_traj, u_traj)
         B_traj = vmap(self.dfdu, in_axes=(0,0))(x_traj, u_traj)
-        return A_traj, B_traj
-    
-    @partial(jit, static_argnums=(0,))
-    def linearize_loss(self, x0, u_traj):
-        x_traj = self.dyn_scan(x0, u_traj)
-        a_traj = vmap(self.dldx, in_axes=(0,0))(x_traj, u_traj)
-        b_traj = vmap(self.dldu, in_axes=(0,0))(x_traj, u_traj)
-        return a_traj, b_traj
+        return x_traj, A_traj, B_traj
 
     def P_dyn_rev(self, Pt, At, Bt):
         return Pt @ At + At.T @ Pt - Pt @ Bt @ self.R_inv @ Bt.T @ Pt + self.Q 

@@ -1,5 +1,5 @@
 <div align="center">
-<img src="media/lqrax_logo.png" alt="logo" width="150"></img>
+<img src="https://raw.githubusercontent.com/MaxMSun/lqrax/main/media/lqrax_logo.png" alt="logo" width="150"></img>
 </div>
 
 # LQRax
@@ -11,7 +11,10 @@ LQRax is [JAX](https://github.com/jax-ml/jax)-enabled continuous-time LQR solver
 
 *This repo is currently under active development.*
 
-<img src="media/drone_landing.gif" alt="2d drone landing example (ilqr)" width="600"/>
+<div align="center">
+<img src="https://raw.githubusercontent.com/MaxMSun/lqrax/main/media/drone_landing.gif" alt="example" width="600"></img>
+</div>
+
 
 ## Install
 
@@ -65,7 +68,7 @@ If you use the package in your research, please cite this repository. You can se
     month = march,
     title = {{LQRax: JAX-enabled continuous-time LQR solver}},
     url = {https://github.com/MaxMSun/lqrax},
-    version = {0.0.1},
+    version = {0.0.3},
     year = {2025}
 }
 ```
