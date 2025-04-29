@@ -35,7 +35,7 @@ $$
 \text{s.t. } \dot{x}(t) = A(t) x(t) + B(t) u(t), \quad x(0) = x_0
 $$
 
-An jupyter notebook example for the `LQR` module is provided [here](examples/lqr_example.ipynb). You can open it in Google Colab [here](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb).
+An jupyter notebook example for the `LQR` module is provided [here](https://github.com/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb). You can open it in Google Colab [here](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb).
 
 The `iLQR` module solves a different time-varying LQR problem:
 
@@ -54,7 +54,7 @@ $$
 
 where the $z(t)$ and $v(t)$ are perturbations on the system's state $x(t)$ and control $u(t)$, and $A(t)$ and $B(t)$ are the linearized system dynamics $f(x(t), u(t))$ on the current system trajectory with respect to the state and control. 
 
-An jupyter notebook example of using the `iLQR` module for a nonlinear control problem is provided [here](examples/ilqr_example.ipynb). You can open it in Google Colab [here](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb).
+An jupyter notebook example of using the `iLQR` module for a nonlinear control problem is provided [here](https://github.com/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb). You can open it in Google Colab [here](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb).
 
 ## Copyright and License
 
@@ -68,7 +68,7 @@ If you use the package in your research, please cite this repository. You can se
     month = march,
     title = {{LQRax: JAX-enabled continuous-time LQR solver}},
     url = {https://github.com/MaxMSun/lqrax},
-    version = {0.0.3},
+    version = {0.0.4},
     year = {2025}
 }
 ```

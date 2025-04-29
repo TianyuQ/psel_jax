@@ -143,4 +143,4 @@ class iLQR:
         z_traj = self.z_dyn_scan(z0, P_traj, r_traj, A_traj, B_traj, b_traj)
         v_traj = vmap(self.z2v, in_axes=(0,0,0,0,0))(z_traj, P_traj, r_traj, B_traj, b_traj)
 
-        return v_traj
+        return v_traj, z_traj

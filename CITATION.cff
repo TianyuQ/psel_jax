@@ -5,7 +5,7 @@ authors:
     given-names: [Max Muchen]
     orcid: [0000-0002-3704-6315]
 title: "LQRax: JAX-Enabled continuous-time LQR solver"
-version: "0.0.3"
+version: "0.0.4"
 date-released: 2025-03-28
 url: "https://github.com/MaxMSun/lqrax"
 repository-code: "https://github.com/MaxMSun/lqrax"

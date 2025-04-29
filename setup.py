@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="lqrax", 
-    version="0.0.3", 
+    version="0.0.4", 
     author="Max Muchen Sun",
     author_email="msun@u.northwestern.edu",
     description="JAX-enabled continuous-time LQR solver", 
