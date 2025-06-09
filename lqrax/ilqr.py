@@ -38,7 +38,7 @@ class iLQR:
         return xt_new, xt_new 
     
     @partial(jit, static_argnums=(0,))
-    def dyn_scan(self, x0, u_traj):
+    def traj_sim(self, x0, u_traj):
         xT, x_traj = scan(f=self.dyn_step, init=x0, xs=u_traj)
         return x_traj
     
@@ -50,7 +50,7 @@ class iLQR:
     
     @partial(jit, static_argnums=(0,))
     def linearize_dyn(self, x0, u_traj):
-        x_traj = self.dyn_scan(x0, u_traj)
+        x_traj = self.traj_sim(x0, u_traj)
         A_traj = vmap(self.dfdx, in_axes=(0,0))(x_traj, u_traj)
         B_traj = vmap(self.dfdu, in_axes=(0,0))(x_traj, u_traj)
         return x_traj, A_traj, B_traj
@@ -116,7 +116,7 @@ class iLQR:
         return zt_new, zt_new
     
     @partial(jit, static_argnums=(0,))
-    def z_dyn_scan(self, z0, P_traj, r_traj, A_traj, B_traj, b_traj):
+    def z_traj_sim(self, z0, P_traj, r_traj, A_traj, B_traj, b_traj):
         zT, z_traj = scan(
             f=self.z_dyn_step,
             init=z0,
@@ -140,7 +140,7 @@ class iLQR:
         r_traj = r_traj_rev[::-1]
 
         z0 = jnp.zeros(self.x_dim)
-        z_traj = self.z_dyn_scan(z0, P_traj, r_traj, A_traj, B_traj, b_traj)
+        z_traj = self.z_traj_sim(z0, P_traj, r_traj, A_traj, B_traj, b_traj)
         v_traj = vmap(self.z2v, in_axes=(0,0,0,0,0))(z_traj, P_traj, r_traj, B_traj, b_traj)
 
         return v_traj, z_traj
