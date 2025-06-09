@@ -11,11 +11,6 @@ LQRax is [JAX](https://github.com/jax-ml/jax)-enabled continuous-time LQR solver
 
 *This repo is currently under active development.*
 
-<div align="center">
-<img src="https://raw.githubusercontent.com/MaxMSun/lqrax/main/media/drone_landing.gif" alt="example" width="600"></img>
-</div>
-
-
 ## Install
 
 Follow the [instructions](https://github.com/jax-ml/jax?tab=readme-ov-file#installation) to install JAX before installing this package.
@@ -35,8 +30,6 @@ $$
 \text{s.t. } \dot{x}(t) = A(t) x(t) + B(t) u(t), \quad x(0) = x_0
 $$
 
-An jupyter notebook example for the `LQR` module is provided [here](https://github.com/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb). You can open it in Google Colab [here](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb).
-
 The `iLQR` module solves a different time-varying LQR problem:
 
 $$
@@ -54,7 +47,14 @@ $$
 
 where the $z(t)$ and $v(t)$ are perturbations on the system's state $x(t)$ and control $u(t)$, and $A(t)$ and $B(t)$ are the linearized system dynamics $f(x(t), u(t))$ on the current system trajectory with respect to the state and control. 
 
-An jupyter notebook example of using the `iLQR` module for a nonlinear control problem is provided [here](https://github.com/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb). You can open it in Google Colab [here](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb).
+## Examples
+
+| *Example* | *Code* | 
+| :---: | :---: |
+| **LQR for double integrator** <br> <img src="media/lqr_example.png" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/lqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb) | 
+| **Nonlinear control with iLQR** <br> <img src="media/rocket_landing.gif" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/ilqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb) | 
+| **Multi-agent iLQGames** <br> <img src="media/ilqgames.gif" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/ilqgames_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqgames_example.ipynb) |
+| **Ergodic control** <br> <img src="media/fourier_ergctrl.gif" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/ergctrl_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ergctrl_example.ipynb) |  
 
 ## Copyright and License
 
