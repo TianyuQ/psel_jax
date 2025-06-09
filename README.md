@@ -52,8 +52,9 @@ where the $z(t)$ and $v(t)$ are perturbations on the system's state $x(t)$ and c
 | *Example* | *Code* | *Example* | *Code* |
 | :---: | :---: | :---: | :---: |
 | **LQR for double integrator** <br> <img src="media/lqr_example.png" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/lqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb) | **Nonlinear control with iLQR** <br> <img src="media/rocket_landing.gif" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/ilqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb) |
-| **Multi-agent iLQGames** <br> <img src="media/ilqgames.gif" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/ilqgames_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqgames_example.ipynb) | **Ergodic control** <br> <img src="media/fourier_ergctrl.gif" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/ergctrl_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ergctrl_example.ipynb) |
+| **Multi-agent iLQGames** <br> <img src="media/ilqgames.gif" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/ilqgames_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqgames_example.ipynb) | **Ergodic control** <br> <img src="media/fourier_ergctrl.gif" alt="drawing" width="200"/> | [[Jupyter Notebook]](examples/ergctrl_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ergctrl_example.ipynb) |å
 
+Please also checkout [Linear Quadratic Flow Matching](https://murpheylab.github.io/lqr-flow-matching/) that uses this package (the `LQR` module).
 
 ## Copyright and License
 
