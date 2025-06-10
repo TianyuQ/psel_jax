@@ -12,6 +12,15 @@
 
 *This repo is currently under active development.*
 
+## Examples
+
+| *Example* | *Code* | *Example* | *Code* |
+| :---: | :---: | :---: | :---: |
+| **LQR Basics** <br> <img src="media/lqr_example.png" alt="drawing" width="200"/> | [[Notebook]](examples/lqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb) | **Nonlinear control** <br> <img src="media/rocket_landing.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ilqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb) |
+| **Multi-agent iLQGames** <br> <img src="media/ilqgames.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ilqgames_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqgames_example.ipynb) | **Ergodic control** <br> <img src="media/fourier_ergctrl.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ergctrl_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ergctrl_example.ipynb) <br> [[More]](https://github.com/MurpheyLab/ergodic-control-sandbox) |
+
+Please also checkout [Linear Quadratic Flow Matching](https://murpheylab.github.io/lqr-flow-matching/) that uses this package.
+
 ## Install
 
 Follow the [instructions](https://github.com/jax-ml/jax?tab=readme-ov-file#installation) to install JAX before installing this package.
@@ -47,15 +56,6 @@ $$
 $$ 
 
 where the $z(t)$ and $v(t)$ are perturbations on the system's state $x(t)$ and control $u(t)$, and $A(t)$ and $B(t)$ are the linearized system dynamics $f(x(t), u(t))$ on the current system trajectory with respect to the state and control. 
-
-## Examples
-
-| *Example* | *Code* | *Example* | *Code* |
-| :---: | :---: | :---: | :---: |
-| **LQR Basics** <br> <img src="media/lqr_example.png" alt="drawing" width="200"/> | [[Notebook]](examples/lqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb) | **Nonlinear control** <br> <img src="media/rocket_landing.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ilqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb) |
-| **Multi-agent iLQGames** <br> <img src="media/ilqgames.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ilqgames_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqgames_example.ipynb) | **Ergodic control** <br> <img src="media/fourier_ergctrl.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ergctrl_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ergctrl_example.ipynb) <br> [[More]](https://github.com/MurpheyLab/ergodic-control-sandbox) |
-
-Please also checkout [Linear Quadratic Flow Matching](https://murpheylab.github.io/lqr-flow-matching/) that uses this package.
 
 ## Copyright and License
 
