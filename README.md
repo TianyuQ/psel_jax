@@ -3,7 +3,7 @@
 </div>
 
 # LQRax
-LQRax is a GPU-friendly, auto-differentiable solver for continuous-time Riccati equations and LQR problems, enabled by [JAX](https://github.com/jax-ml/jax).
+**LQRax is a GPU-friendly, auto-differentiable solver for continuous-time LQR problems based on Riccati equations, enabled by [JAX](https://github.com/jax-ml/jax).**
 
 - It accelerates numerical simulation through JAX's [`scan`](https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html) mechanism;
 - It enables rapid prototyping of single-agent and multi-agent nonlinear control algorithms, with [auto-differentiation](https://docs.jax.dev/en/latest/automatic-differentiation.html) support on the loss function and dynamics;
