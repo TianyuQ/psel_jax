@@ -5,7 +5,7 @@
 # LQRax
 **LQRax is a GPU-friendly, auto-differentiable solver for continuous-time LQR problems based on Riccati equations, enabled by [JAX](https://github.com/jax-ml/jax).**
 
-- It accelerates numerical simulation through JAX's [`scan`](https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html) mechanism;
+- It accelerates numerical simulation through JAX's [`scan`](https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html) mechanism;git@github.com:MaxMSun/lqrax.git
 - It enables rapid prototyping of single-agent and multi-agent nonlinear control algorithms, with [auto-differentiation](https://docs.jax.dev/en/latest/automatic-differentiation.html) support on the loss function and dynamics;
 - It enables batch-based large-scale optimal control on GPUs using JAX's [`vmap`](https://docs.jax.dev/en/latest/_autosummary/jax.vmap.html) mechanism.
 - All the operations, including trajectory simulation and control synthesis, are backward-differentiable.
@@ -16,8 +16,8 @@
 
 | *Example* | *Code* | *Example* | *Code* |
 | :---: | :---: | :---: | :---: |
-| **LQR Basics** <br> <img src="media/lqr_example.png" alt="drawing" width="200"/> | [[Notebook]](examples/lqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb) | **Nonlinear control** <br> <img src="media/rocket_landing.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ilqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb) |
-| **Multi-agent iLQGames** <br> <img src="media/ilqgames.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ilqgames_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqgames_example.ipynb) | **Ergodic control** <br> <img src="media/fourier_ergctrl.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ergctrl_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ergctrl_example.ipynb) <br> [[More]](https://github.com/MurpheyLab/ergodic-control-sandbox) |
+| **LQR basics<br>(state tracking)** <br> <img src="media/lqr_example.png" alt="drawing" width="200"/> | [[Notebook]](examples/lqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/lqr_example.ipynb) | **Nonlinear control<br>(rocket landing)** <br> <img src="media/rocket_landing.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ilqr_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqr_example.ipynb) |
+| **Multi-agent games<br>(social navigation)** <br> <img src="media/ilqgames.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ilqgames_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ilqgames_example.ipynb) | **Ergodic control<br>(active search)** <br> <img src="media/fourier_ergctrl.gif" alt="drawing" width="200"/> | [[Notebook]](examples/ergctrl_example.ipynb) <br> [[Google Colab]](https://colab.research.google.com/github/MaxMSun/lqrax/blob/main/examples/ergctrl_example.ipynb) <br> [[More]](https://github.com/MurpheyLab/ergodic-control-sandbox) |
 
 Please also checkout [Linear Quadratic Flow Matching](https://murpheylab.github.io/lqr-flow-matching/) that uses this package.
 
