@@ -37,32 +37,97 @@ import flax.serialization
 
 # Import from the main lqrax module
 import sys
-sys.path.append('..')
+import os
+
+# Add the project root to the path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 from lqrax import iLQR
+from config_loader import load_config, setup_jax_config, create_log_dir
 
 
 # ============================================================================
-# GLOBAL PARAMETERS
+# CONFIGURATION LOADING
 # ============================================================================
 
-# Network architecture parameters
-N_agents = 4  # Number of agents
-T_observation = 10  # Number of observation time steps
-T_reference = 50  # Number of reference time steps
-state_dim = 4  # State dimension (x, y, vx, vy)
-goal_dim = 2  # Goal dimension (x, y)
+# Load configuration
+config = load_config()
+
+# Setup JAX configuration
+setup_jax_config()
+
+# Extract parameters from config
+# Game parameters
+N_agents = config.game.N_agents
+T_observation = config.game.T_observation
+T_reference = config.game.T_total
+state_dim = config.game.state_dim
+goal_dim = 2  # Goal dimension (x, y) - not in config, keeping as constant
 
 # Training parameters
-num_epochs = 1000
-learning_rate = 0.001
-batch_size = 32
-goal_loss_weight = 1.0
+num_epochs = config.goal_inference.num_epochs
+learning_rate = config.goal_inference.learning_rate
+batch_size = config.goal_inference.batch_size
+goal_loss_weight = config.goal_inference.goal_loss_weight
+
+# Network architecture parameters
+# Set hidden dimensions based on number of agents from config
+if N_agents == 4:
+    hidden_dims = config.goal_inference.hidden_dims_4p
+elif N_agents == 10:
+    hidden_dims = config.goal_inference.hidden_dims_10p
+else:
+    # Default fallback to 4p dimensions
+    hidden_dims = config.goal_inference.hidden_dims_4p
+    print(f"Warning: Using 4p hidden dimensions {hidden_dims} for {N_agents} agents")
+
+hidden_dim = hidden_dims[0]  # Use first hidden dimension
+dropout_rate = config.goal_inference.dropout_rate
 
 # Data splitting
-validation_split = 0.25  # 1/4 for validation
+validation_split = 0.25  # 1/4 for validation - not in config, keeping as constant
 
 # File paths
-reference_dir = "reference_trajectories_4p"
+reference_dir = config.paths.reference_data_dir
+
+# Random seed
+random_seed = config.training.seed
+
+# Testing parameters
+num_eval_samples = config.testing.num_test_samples
+num_vis_samples = min(5, num_eval_samples)  # Number of samples for visualization
+
+# Plot parameters
+plot_dpi = config.reference_generation.plot_dpi
+plot_format = config.reference_generation.plot_format
+
+# Environment parameters
+def get_boundary_size(n_agents):
+    """Get boundary size based on number of agents."""
+    if n_agents <= 4:
+        return 2.5
+    else:
+        return 3.5
+
+boundary_size = get_boundary_size(N_agents)
+
+# Network activation function
+activation_function = config.goal_inference.activation
+
+def get_activation_fn(activation_name):
+    """Get activation function by name."""
+    if activation_name == "relu":
+        return nn.relu
+    elif activation_name == "tanh":
+        return nn.tanh
+    elif activation_name == "swish":
+        return lambda x: x * nn.sigmoid(x)
+    else:
+        print(f"Warning: Unknown activation function '{activation_name}', using ReLU")
+        return nn.relu
+
+activation_fn = get_activation_fn(activation_function)
 
 # Device selection - Always use GPU for training
 # Force GPU usage
@@ -70,9 +135,8 @@ gpu_devices = jax.devices("gpu")
 if gpu_devices:
     device = gpu_devices[0]
     print(f"Using GPU: {device}")
-    # Set JAX to use GPU
-    os.environ['JAX_PLATFORM_NAME'] = 'gpu'
-    print("JAX platform forced to: gpu")
+    # JAX platform is configured via setup_jax_config()
+    print("JAX platform configured via config")
     
     # Test GPU functionality with a simple operation
     test_array = jax.random.normal(jax.random.PRNGKey(0), (10, 10))
@@ -89,7 +153,7 @@ else:
 class GoalInferenceNetwork(nn.Module):
     """Goal inference network for predicting agent goals from observation trajectories."""
     
-    hidden_dim: int = 128
+    hidden_dims: List[int]
     goal_output_dim: int = N_agents * goal_dim
     
     @nn.compact
@@ -115,17 +179,17 @@ class GoalInferenceNetwork(nn.Module):
         # Flatten all agent states
         x = x.reshape(batch_size, N_agents * state_dim)
         
-        # Feature extraction layers
-        x = nn.Dense(features=self.hidden_dim)(x)
-        x = nn.relu(x)
-        x = nn.Dropout(rate=0.1)(x, deterministic=deterministic)
+        # Feature extraction layers using the full hidden_dims list
+        x = nn.Dense(features=self.hidden_dims[0])(x)
+        x = activation_fn(x)
+        x = nn.Dropout(rate=dropout_rate)(x, deterministic=deterministic)
         
-        x = nn.Dense(features=self.hidden_dim // 2)(x)
-        x = nn.relu(x)
-        x = nn.Dropout(rate=0.1)(x, deterministic=deterministic)
+        x = nn.Dense(features=self.hidden_dims[1])(x)
+        x = activation_fn(x)
+        x = nn.Dropout(rate=dropout_rate)(x, deterministic=deterministic)
         
-        x = nn.Dense(features=self.hidden_dim // 4)(x)
-        x = nn.relu(x)
+        x = nn.Dense(features=self.hidden_dims[2])(x)
+        x = activation_fn(x)
         
         # Goal prediction output
         goals = nn.Dense(features=self.goal_output_dim)(x)
@@ -149,10 +213,20 @@ def goal_prediction_loss(predicted_goals: jnp.ndarray, true_goals: jnp.ndarray) 
     Returns:
         Goal prediction loss value
     """
-    # Compute mean squared error between predicted and true goals
-    goal_diff = predicted_goals - true_goals
-    goal_mse = jnp.mean(jnp.square(goal_diff))
-    return goal_mse
+    # Reshape to (batch_size, N_agents, goal_dim) for per-agent computation
+    batch_size = predicted_goals.shape[0]
+    predicted_goals_reshaped = predicted_goals.reshape(batch_size, N_agents, goal_dim)
+    true_goals_reshaped = true_goals.reshape(batch_size, N_agents, goal_dim)
+    
+    # Compute per-agent goal error: err_x² + err_y² for each agent
+    goal_diff = predicted_goals_reshaped - true_goals_reshaped  # (batch_size, N_agents, goal_dim)
+    per_agent_error = jnp.sum(jnp.square(goal_diff), axis=2)  # (batch_size, N_agents) - sum over x,y dimensions
+    
+    # Take mean over N agents for each sample, then mean over all samples
+    mean_per_sample = jnp.mean(per_agent_error, axis=1)  # (batch_size,) - mean over agents
+    total_loss = jnp.mean(mean_per_sample)  # scalar - mean over samples
+    
+    return total_loss
 
 
 # ============================================================================
@@ -269,7 +343,7 @@ def create_train_state(model: nn.Module, learning_rate: float) -> train_state.Tr
     dummy_input = jnp.ones(input_shape)
     
     # Initialize model parameters
-    rng = jax.random.PRNGKey(42)
+    rng = jax.random.PRNGKey(random_seed)
     variables = model.init(rng, dummy_input)
     params = variables['params']
     
@@ -430,8 +504,7 @@ def train_goal_inference_network(goal_model: GoalInferenceNetwork,
     print(f"Observation steps: {T_observation}, Reference steps: {T_reference}")
     
     # Create log directory
-    log_dir = f"log/goal_inference_N_{N_agents}_T_{T_reference}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}"
-    os.makedirs(log_dir, exist_ok=True)
+    log_dir = create_log_dir("goal_inference", config)
     
     # Initialize TensorBoard writer
     writer = SummaryWriter(log_dir=log_dir)
@@ -445,7 +518,7 @@ def train_goal_inference_network(goal_model: GoalInferenceNetwork,
     best_epoch = 0
     
     # Initialize random key for training
-    rng = jax.random.PRNGKey(42)
+    rng = jax.random.PRNGKey(random_seed)
     
     # Progress bar for epochs
     progress_bar = tqdm(range(num_epochs), desc="Training Progress")
@@ -510,7 +583,7 @@ def train_goal_inference_network(goal_model: GoalInferenceNetwork,
     print(f"\nTraining completed!")
     print(f"Log directory: {log_dir}")
     print(f"Best model saved to: {log_dir}/goal_inference_best_model.pkl")
-    print(f"Config saved to: {log_dir}/training_config.json")
+    print(f"Training results saved to: {log_dir}/training_results.json")
     print(f"Final training loss: {losses[-1]:.4f}")
     print(f"Best validation loss: {best_loss:.4f} (achieved at epoch {best_epoch})")
     
@@ -527,7 +600,7 @@ def save_model(state: train_state.TrainState, log_dir: str, filename: str):
 
 def save_training_config(log_dir: str, num_epochs: int, learning_rate: float, batch_size: int, goal_loss_weight: float):
     """Save training configuration to JSON file."""
-    config = {
+    training_results = {
         'num_epochs': num_epochs,
         'learning_rate': learning_rate,
         'batch_size': batch_size,
@@ -540,9 +613,9 @@ def save_training_config(log_dir: str, num_epochs: int, learning_rate: float, ba
         'validation_split': validation_split
     }
     
-    config_path = os.path.join(log_dir, 'training_config.json')
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
+    training_results_path = os.path.join(log_dir, 'training_results.json')
+    with open(training_results_path, 'w') as f:
+        json.dump(training_results, f, indent=2)
 
 
 
@@ -565,7 +638,7 @@ def evaluate_goal_inference_model(model: nn.Module, trained_state: train_state.T
     goal_prediction_errors = []
     
     # Sample random indices
-    rng = jax.random.PRNGKey(42)
+    rng = jax.random.PRNGKey(random_seed)
     rng, sample_key = jax.random.split(rng)
     sample_indices = jax.random.choice(sample_key, len(reference_data), shape=(num_samples,), replace=False)
     
@@ -618,7 +691,7 @@ def visualize_goal_predictions(model: nn.Module, trained_state: train_state.Trai
     print(f"\nVisualizing goal predictions for {num_samples} samples...")
     
     # Sample random indices
-    rng = jax.random.PRNGKey(42)
+    rng = jax.random.PRNGKey(random_seed)
     rng, sample_key = jax.random.split(rng)
     sample_indices = jax.random.choice(sample_key, len(reference_data), shape=(num_samples,), replace=False)
     
@@ -642,8 +715,8 @@ def visualize_goal_predictions(model: nn.Module, trained_state: train_state.Trai
         # Create visualization
         fig, ax = plt.subplots(1, 1, figsize=(12, 10))
         ax.set_aspect('equal')
-        ax.set_xlim(-3, 3)
-        ax.set_ylim(-3, 3)
+        ax.set_xlim(-boundary_size, boundary_size)
+        ax.set_ylim(-boundary_size, boundary_size)
         ax.set_title(f'Sample {i+1}: Goal Predictions vs True Goals')
         ax.set_xlabel('X Position')
         ax.set_ylabel('Y Position')
@@ -680,8 +753,8 @@ def visualize_goal_predictions(model: nn.Module, trained_state: train_state.Trai
         
         # Save plot if save_dir is provided
         if save_dir:
-            plot_path = os.path.join(save_dir, f"goal_predictions_sample_{i+1:03d}.png")
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plot_path = os.path.join(save_dir, f"goal_predictions_sample_{i+1:03d}.{plot_format}")
+            plt.savefig(plot_path, dpi=plot_dpi, bbox_inches='tight')
             print(f"Goal prediction plot saved to: {plot_path}")
         
         # Always close the plot to free memory
@@ -696,13 +769,18 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Goal Inference Network Pretraining")
     print("=" * 60)
+    print(f"Configuration loaded from: config.yaml")
+    print(f"Game parameters: N_agents={N_agents}, T_observation={T_observation}, T_reference={T_reference}")
+    print(f"Training parameters: epochs={num_epochs}, lr={learning_rate}, batch_size={batch_size}")
+    print(f"Network parameters: hidden_dim={hidden_dim}, dropout_rate={dropout_rate}")
+    print("=" * 60)
     
     # Load reference trajectories
     print(f"Loading reference trajectories from directory: {reference_dir}...")
     training_data, validation_data = load_and_split_reference_trajectories(reference_dir, validation_split)
     
-    # Create goal inference model
-    goal_model = GoalInferenceNetwork()
+    # Create goal inference model with appropriate hidden dimensions
+    goal_model = GoalInferenceNetwork(hidden_dims=hidden_dims)
     
     # Train the goal inference network
     print("Training Goal Inference Network...")
@@ -720,8 +798,8 @@ if __name__ == "__main__":
     with open(best_model_path, 'wb') as f:
         pickle.dump(best_model_bytes, f)
     
-    # Save training config
-    config = {
+    # Save training config with additional training results
+    training_results = {
         'N_agents': N_agents,
         'T_observation': T_observation,
         'T_reference': T_reference,
@@ -732,21 +810,22 @@ if __name__ == "__main__":
         'final_loss': float(losses[-1]),
         'best_loss': float(best_loss),
         'best_epoch': int(best_epoch + 1),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'config_source': 'config.yaml'
     }
-    config_path = os.path.join(log_dir, "training_config.json")
+    config_path = os.path.join(log_dir, "training_results.json")
     with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
+        json.dump(training_results, f, indent=2)
     
     print(f"\nTraining completed!")
     print(f"Log directory: {log_dir}")
     print(f"Best model saved to: {best_model_path}")
-    print(f"Config saved to: {config_path}")
+    print(f"Training results saved to: {config_path}")
     print(f"Final loss: {losses[-1]:.4f}")
     print(f"Best loss: {best_loss:.4f} (achieved at epoch {best_epoch+1})")
     
     # Evaluate the trained model
-    evaluation_metrics = evaluate_goal_inference_model(goal_model, trained_state, validation_data, num_samples=20)
+    evaluation_metrics = evaluate_goal_inference_model(goal_model, trained_state, validation_data, num_samples=num_eval_samples)
     
     # Save evaluation metrics
     metrics_path = os.path.join(log_dir, "evaluation_metrics.json")
@@ -755,7 +834,7 @@ if __name__ == "__main__":
     print(f"Evaluation metrics saved to: {metrics_path}")
     
     # Visualize goal predictions
-    visualize_goal_predictions(goal_model, trained_state, validation_data, num_samples=5, save_dir=log_dir)
+    visualize_goal_predictions(goal_model, trained_state, validation_data, num_samples=num_vis_samples, save_dir=log_dir)
     
     # Plot training loss
     plt.figure(figsize=(10, 6))
@@ -764,8 +843,8 @@ if __name__ == "__main__":
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.grid(True)
-    plot_path = os.path.join(log_dir, "training_loss.png")
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plot_path = os.path.join(log_dir, f"training_loss.{plot_format}")
+    plt.savefig(plot_path, dpi=plot_dpi, bbox_inches='tight')
     plt.close()
     
     print(f"Training loss plot saved to: {plot_path}")

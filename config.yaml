@@ -20,7 +20,7 @@ game:
   T_observation: 10         # Number of steps to observe before solving the game
 
   # Agent configuration
-  N_agents: 4               # Total number of agents in the game
+  N_agents: 10               # Total number of agents in the game
   ego_agent_id: 0           # ID of the ego agent (usually 0)
   
   # State and control dimensions
@@ -55,7 +55,7 @@ optimization:
 reference_generation:
   # Data generation parameters
   num_samples: 512           # Number of reference trajectory samples to generate
-  save_dir: "reference_trajectories_4p"  # Directory to save reference trajectories
+  save_dir: "reference_trajectories_10p"  # Directory to save reference trajectories
   
   # Trajectory type
   trajectory_type: "linear" # Type of reference trajectory ["linear", "spline", "polynomial"]
@@ -70,14 +70,16 @@ reference_generation:
 # ============================================================================
 goal_inference:
   # Network architecture
-  hidden_dims: [64, 64, 32] # Hidden layer dimensions
+  # Hidden layer dimensions: [128, 64, 32] for 4 players, [256, 128, 64] for 10 players
+  hidden_dims_4p: [128, 64, 32]    # Hidden dimensions for 4 players
+  hidden_dims_10p: [256, 128, 64]  # Hidden dimensions for 10 players
   activation: "relu"        # Activation function ["relu", "tanh", "swish"]
   dropout_rate: 0.1         # Dropout rate during training
   
   # Training parameters
   learning_rate: 0.001      # Learning rate for Adam optimizer
   batch_size: 32            # Batch size for training
-  num_epochs: 1000          # Number of training epochs
+  num_epochs: 400          # Number of training epochs
   
   # Loss function weights
   goal_loss_weight: 1.0     # Weight for goal prediction loss
@@ -95,20 +97,21 @@ goal_inference:
 # ============================================================================
 psn:
   # Network architecture
-  hidden_dims: [128, 64, 32] # Hidden layer dimensions for PSN
+  # Hidden layer dimensions: [128, 64, 32] for 4 players, [256, 128, 64] for 10 players
+  hidden_dims_4p: [128, 64, 32]    # Hidden dimensions for 4 players
+  hidden_dims_10p: [256, 128, 64]  # Hidden dimensions for 10 players
   output_dim_per_agent: 8   # Output dimension per other agent
   activation: "relu"        # Activation function
   use_batch_norm: true      # Whether to use batch normalization
   dropout_rate: 0.1         # Dropout rate
   
   # Training parameters
-  learning_rate: 0.001      # Learning rate for Adam optimizer
+  learning_rate: 0.002      # Learning rate for Adam optimizer
   batch_size: 32            # Batch size for training
-  num_epochs: 300            # Number of training epochs
-  warmup_epochs: 10          # Number of warmup epochs
+  num_epochs: 1            # Number of training epochs
   
   # Loss function weights
-  sigma1: 0.05              # Weight for mask sparsity loss (negative = encourage sparsity)
+  sigma1: 0.1              # Weight for mask sparsity loss
   sigma2: 0.0               # Weight for mask diversity loss
   
   # Mask parameters
@@ -152,11 +155,17 @@ training:
 testing:
   # Test data parameters
   num_test_samples: 10      # Number of test samples to evaluate
-  test_data_dir: "reference_trajectories_4p"  # Directory with test data
+  test_data_dir: "reference_trajectories_${N_agents}p"  # Directory with test data
   
   # Model paths for testing
-  psn_model: "log/goal_inference_N_4_T_50_obs_10_lr_0.001_bs_32_goal_loss_weight_1.0_epochs_1000/psn_pretrained_goals_N_4_T_50_obs_10_lr_0.001_bs_32_sigma1_0.05_sigma2_0.0_epochs_300/psn_best_model.pkl"
-  goal_inference_model: "log/goal_inference_N_4_T_50_obs_10_lr_0.001_bs_32_goal_loss_weight_1.0_epochs_1000/goal_inference_best_model.pkl"
+  # These are template paths that will be dynamically filled based on actual parameters
+  # Format: log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/
+  psn_model_template: "log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/psn_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{psn_epochs}/psn_best_model.pkl"
+  goal_inference_model_template: "log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/goal_inference_best_model.pkl"
+  
+  # Default model paths (fallback for when templates can't be resolved)
+  psn_model: null  # Will be set programmatically based on actual training parameters
+  goal_inference_model: null  # Will be set programmatically based on actual training parameters
   
   # Receding horizon testing parameters
   receding_horizon:
@@ -193,6 +202,40 @@ testing:
   plots_dir: "test_plots"           # Directory for test plots
 
 # ============================================================================
+# UTILITY FUNCTIONS FOR MODEL PATHS
+# ============================================================================
+# These functions can be implemented in your code to automatically resolve model paths
+# based on the current configuration parameters
+
+# Example Python function to resolve model paths:
+# def get_model_paths(config):
+#     """Get model paths based on current configuration."""
+#     psn_model_path = config.testing.psn_model_template.format(
+#         N_agents=config.game.N_agents,
+#         T_total=config.game.T_total,
+#         T_observation=config.game.T_observation,
+#         learning_rate=config.goal_inference.learning_rate,
+#         batch_size=config.goal_inference.batch_size,
+#         goal_loss_weight=config.goal_inference.goal_loss_weight,
+#         num_epochs=config.goal_inference.num_epochs,
+#         sigma1=config.psn.sigma1,
+#         sigma2=config.psn.sigma2,
+#         psn_epochs=config.psn.num_epochs
+#     )
+#     
+#     goal_inference_model_path = config.testing.goal_inference_model_template.format(
+#         N_agents=config.game.N_agents,
+#         T_total=config.game.T_total,
+#         T_observation=config.game.T_observation,
+#         learning_rate=config.goal_inference.learning_rate,
+#         batch_size=config.goal_inference.batch_size,
+#         goal_loss_weight=config.goal_inference.goal_loss_weight,
+#         num_epochs=config.goal_inference.num_epochs
+#     )
+#     
+#     return psn_model_path, goal_inference_model_path
+
+# ============================================================================
 # SCALABILITY TESTING
 # ============================================================================
 scalability:
@@ -211,9 +254,9 @@ scalability:
 # ============================================================================
 paths:
   # Data directories
-  reference_data_dir: "reference_trajectories_4p"
-  goal_inference_data_dir: "reference_trajectories_4p"
-  
+  reference_data_dir: "reference_trajectories_${N_agents}p"
+  goal_inference_data_dir: "reference_trajectories_${N_agents}p"
+
   # Model directories
   models_dir: "models"
   checkpoints_dir: "checkpoints"
@@ -251,3 +294,25 @@ device:
   # JAX configuration
   jax_enable_x64: false     # Whether to enable 64-bit precision
   jax_platform_name: null  # JAX platform name (null = auto-detect)
+
+# ============================================================================
+# DYNAMIC CONFIGURATION HELPERS
+# ============================================================================
+# These values are automatically computed based on N_agents
+# Access them in your code as: config.goal_inference.hidden_dims_4p or config.goal_inference.hidden_dims_10p
+# Then select based on N_agents:
+#   hidden_dims = config.goal_inference.hidden_dims_4p if config.game.N_agents == 4 else config.goal_inference.hidden_dims_10p
+
+# Model path templates can be resolved programmatically:
+#   psn_model_path = config.testing.psn_model_template.format(
+#       N_agents=config.game.N_agents,
+#       T_total=config.game.T_total,
+#       T_observation=config.game.T_observation,
+#       learning_rate=config.goal_inference.learning_rate,
+#       batch_size=config.goal_inference.batch_size,
+#       goal_loss_weight=config.goal_inference.goal_loss_weight,
+#       num_epochs=config.goal_inference.num_epochs,
+#       sigma1=config.psn.sigma1,
+#       sigma2=config.psn.sigma2,
+#       psn_epochs=config.psn.num_epochs
+#   )

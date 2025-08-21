@@ -64,8 +64,17 @@ print(f"Using device: {device}")
 # Extract parameters from configuration
 N_agents = config.game.N_agents
 T_observation = config.goal_inference.observation_length
-T_total = config.game.T_steps
+T_total = config.game.T_total
 state_dim = config.game.state_dim
+
+if N_agents == 4:
+    hidden_dims = config.goal_inference.hidden_dims_4p
+elif N_agents == 10:
+    hidden_dims = config.goal_inference.hidden_dims_10p
+else:
+    # Default fallback to 4p dimensions
+    hidden_dims = config.goal_inference.hidden_dims_4p
+    print(f"Warning: Using 4p hidden dimensions {hidden_dims} for {N_agents} agents")
 
 print(f"Configuration loaded:")
 print(f"  N agents: {N_agents}")
@@ -101,7 +110,7 @@ def load_trained_goal_model(goal_model_path: str) -> Tuple[GoalInferenceNetwork,
         goal_model_bytes = pickle.load(f)
     
     # Create the goal inference model
-    goal_model = GoalInferenceNetwork()
+    goal_model = GoalInferenceNetwork(hidden_dims=hidden_dims)
     
     # Deserialize the goal inference state
     goal_trained_state = flax.serialization.from_bytes(goal_model, goal_model_bytes)
@@ -145,15 +154,20 @@ def test_goal_prediction(goal_model: GoalInferenceNetwork,
     predicted_goals = predicted_goals.reshape(N_agents, 2)
     
     # Compute goal prediction error
-    goal_error = jnp.mean(jnp.square(predicted_goals - true_goals))
-    goal_rmse = jnp.sqrt(goal_error)
+    # Compute per-agent goal error: err_x² + err_y² for each agent
+    goal_diff = predicted_goals - true_goals  # (N_agents, 2)
+    per_agent_error = jnp.sum(jnp.square(goal_diff), axis=1)  # (N_agents,) - sum over x,y dimensions
+    
+    # Take mean over N agents, then compute RMSE
+    mean_agent_error = jnp.mean(per_agent_error)  # scalar - mean over agents
+    goal_rmse = jnp.sqrt(mean_agent_error)
     
     print(f"      Goals RMSE: {goal_rmse:.4f}")
     
     # Compile results
     results = {
         'goal_prediction_rmse': float(goal_rmse),
-        'goal_prediction_error': float(goal_error),
+        'goal_prediction_error': float(mean_agent_error),  # Use the mean agent error (before sqrt)
         'predicted_goals': predicted_goals.tolist(),
         'true_goals': true_goals.tolist(),
         'mode': 'goal_prediction_test'

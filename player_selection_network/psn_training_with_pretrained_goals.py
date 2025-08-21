@@ -96,7 +96,6 @@ class PointAgent(iLQR):
             u[1]   # dvy/dt = ay
         ])
 
-
 # ============================================================================
 # GLOBAL PARAMETERS
 # ============================================================================
@@ -155,10 +154,6 @@ else:
     device = jax.devices("cpu")[0]
     print(f"Using CPU: {device}")
 
-
-
-
-
 # ============================================================================
 # GOAL INFERENCE NETWORK DEFINITION
 # ============================================================================
@@ -210,7 +205,6 @@ class GoalInferenceNetwork(nn.Module):
         
         return goals
 
-
 def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
     """
     Extract observation trajectory (first 10 steps) for all agents.
@@ -235,11 +229,9 @@ def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
     
     return observation_trajectory
 
-
 # ============================================================================
 # PSN NETWORK DEFINITIONS (GOAL-FREE VERSION)
 # ============================================================================
-
 class PlayerSelectionNetwork(nn.Module):
     """
     Player Selection Network (PSN) that learns to select important agents.
@@ -283,7 +275,6 @@ class PlayerSelectionNetwork(nn.Module):
         mask = nn.sigmoid(mask)  # Binary mask
         
         return mask
-
 
 # ============================================================================
 # GAME SOLVING FUNCTIONS
@@ -410,7 +401,6 @@ def create_masked_game_setup(sample_data: Dict[str, Any], ego_agent_id: int,
         
         return agents, initial_states, jnp.array(selected_targets), jnp.array(mask_values)
 
-
 def create_loss_functions(agents: list, mask_values=None, is_training: bool = True, reference_trajectories: list = None) -> tuple:
     """
     Create loss functions and their linearizations for all agents.
@@ -530,7 +520,6 @@ def create_loss_functions(agents: list, mask_values=None, is_training: bool = Tr
         })
     
     return loss_functions, linearize_loss_functions, compiled_functions
-
 
 def solve_masked_game_differentiable(agents: list, initial_states: list, target_positions: jnp.ndarray,
                                    mask_values: jnp.ndarray = None, num_iters: int = 10, 
@@ -766,7 +755,6 @@ def solve_masked_game(agents: list, initial_states: list, target_positions: jnp.
     """
     return solve_masked_game_differentiable(agents, initial_states, target_positions, mask_values, num_iters, reference_trajectories)
 
-
 def extract_ego_reference_trajectory(sample_data: Dict[str, Any], ego_agent_id: int) -> jnp.ndarray:
     """
     Extract reference trajectory for the ego agent.
@@ -781,7 +769,6 @@ def extract_ego_reference_trajectory(sample_data: Dict[str, Any], ego_agent_id: 
     ego_key = f"agent_{ego_agent_id}"
     ego_states = sample_data["trajectories"][ego_key]["states"]
     return jnp.array(ego_states)
-
 
 def similarity_loss(pred_traj: jnp.ndarray, target_traj: jnp.ndarray) -> jnp.ndarray:
     """
@@ -822,7 +809,6 @@ def similarity_loss(pred_traj: jnp.ndarray, target_traj: jnp.ndarray) -> jnp.nda
     
     # Return mean distance
     return jnp.mean(distances)
-
 
 def compute_similarity_loss_from_masked_game(sample_data: Dict[str, Any], ego_agent_id: int,
                                            predicted_mask: jnp.ndarray, predicted_goals: jnp.ndarray) -> jnp.ndarray:
@@ -867,7 +853,6 @@ def compute_similarity_loss_from_masked_game(sample_data: Dict[str, Any], ego_ag
     
     return similarity_val
 
-
 def _observations_to_initial_states(obs_row: jnp.ndarray) -> jnp.ndarray:
     """Convert a flattened observations row into initial 4D states for each agent.
     obs_row: shape (T_observation * N_agents * state_dim,)
@@ -879,7 +864,6 @@ def _observations_to_initial_states(obs_row: jnp.ndarray) -> jnp.ndarray:
     pos = first[:, :2]
     vel = first[:, 2:4]
     return jnp.concatenate([pos, vel], axis=-1)
-
 
 def compute_similarity_loss_from_arrays(agents: list,
                                         initial_states: jnp.ndarray,
@@ -906,7 +890,6 @@ def compute_similarity_loss_from_arrays(agents: list,
 
     ego_traj_masked = state_trajectories[0]
     return similarity_loss(ego_traj_masked, ref_ego_traj)
-
 
 def compute_batch_similarity_loss(predicted_masks: jnp.ndarray,
                                   predicted_goals: jnp.ndarray,
@@ -946,7 +929,6 @@ def compute_batch_similarity_loss(predicted_masks: jnp.ndarray,
     valid_bs = min(predicted_masks.shape[0], observations.shape[0])
     losses = jax.vmap(per_sample)(jnp.arange(valid_bs))
     return jnp.mean(losses)
-
 
 def prepare_batch_for_training(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
@@ -1005,7 +987,6 @@ def prepare_batch_for_training(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.nd
     batch_ref_traj = jnp.stack(batch_ref_traj)
     
     return batch_obs, batch_masks, batch_ref_traj
-
 
 def prepare_batch_for_training_with_progress(batch_data: List[Dict[str, Any]], sample_pbar: tqdm) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
@@ -1069,7 +1050,6 @@ def prepare_batch_for_training_with_progress(batch_data: List[Dict[str, Any]], s
     
     return batch_obs, batch_masks, batch_ref_traj
 
-
 # ============================================================================
 # LOSS FUNCTIONS
 # ============================================================================
@@ -1079,18 +1059,15 @@ def binary_loss(mask: jnp.ndarray) -> jnp.ndarray:
     binary_penalty = mask * (1 - mask)
     return jnp.mean(binary_penalty)
 
-
 def mask_sparsity_loss(mask: jnp.ndarray) -> jnp.ndarray:
     """Mask sparsity loss: encourages fewer agents to be selected."""
     return jnp.mean(mask)
-
 
 def total_loss(mask: jnp.ndarray, binary_loss_val: jnp.ndarray, 
                sparsity_loss_val: jnp.ndarray, similarity_loss_val: jnp.ndarray,
                sigma1: float = 0.1, sigma2: float = 1.0) -> jnp.ndarray:
     """Total loss combining all components."""
     return similarity_loss_val + sigma1 * sparsity_loss_val + sigma2 * binary_loss_val
-
 
 # ============================================================================
 # GOAL INFERENCE INTEGRATION
@@ -1118,7 +1095,6 @@ def load_pretrained_goal_model(model_path: str) -> Tuple[GoalInferenceNetwork, t
     print("Pretrained goal inference model loaded successfully")
     return goal_model, trained_state
 
-
 def predict_goals_with_pretrained_model(goal_model: GoalInferenceNetwork, 
                                        trained_state: train_state.TrainState,
                                        observations: jnp.ndarray, rng: jnp.ndarray = None) -> jnp.ndarray:
@@ -1129,7 +1105,6 @@ def predict_goals_with_pretrained_model(goal_model: GoalInferenceNetwork,
     else:
         # Evaluation mode: deterministic (no dropout)
         return trained_state.apply_fn({'params': trained_state.params}, observations, deterministic=True)
-
 
 # ============================================================================
 # REFERENCE TRAJECTORY LOADING
@@ -1182,7 +1157,6 @@ def load_reference_trajectories(data_dir: str) -> Tuple[List[Dict[str, Any]], Li
     
     return training_data, validation_data
 
-
 # ============================================================================
 # MASKED GAME FUNCTIONS
 # ============================================================================
@@ -1190,7 +1164,6 @@ def load_reference_trajectories(data_dir: str) -> Tuple[List[Dict[str, Any]], Li
 # The create_masked_game_setup, create_loss_functions, solve_masked_game,
 # extract_ego_reference_trajectory, similarity_loss, compute_similarity_loss_from_masked_game,
 # and compute_batch_similarity_loss functions are now defined above.
-
 
 # ============================================================================
 # TRAINING FUNCTIONS
@@ -1210,10 +1183,6 @@ def create_train_state(model: nn.Module, optimizer: optax.GradientTransformation
     )
     
     return state
-
-
-
-
 
 def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
                batch_data: List[Dict[str, Any]], goal_model: GoalInferenceNetwork,
@@ -1265,7 +1234,6 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
     state = state.apply_gradients(grads=grads)
     
     return state, loss, loss_components
-
 
 def validation_step(state: train_state.TrainState, validation_data: List[Dict[str, Any]],
                    goal_model: GoalInferenceNetwork, goal_trained_state: train_state.TrainState,
@@ -1319,18 +1287,17 @@ def validation_step(state: train_state.TrainState, validation_data: List[Dict[st
         # Total validation loss
         total_loss_val = total_loss(predicted_masks, binary_loss_val, 
                                   sparsity_loss_val, similarity_loss_val,
-                                  0.0, 0.0)  # No regularization during validation
-        
+                                  sigma1, sigma2)  # No regularization during validation
+
         val_losses.append(float(total_loss_val))
         val_sparsity_losses.append(float(sparsity_loss_val))
         val_similarity_losses.append(float(similarity_loss_val))
     
-    avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else float('inf')
-    avg_val_sparsity = sum(val_sparsity_losses) / len(val_sparsity_losses) if val_sparsity_losses else float('inf')
-    avg_val_similarity = sum(val_similarity_losses) / len(val_similarity_losses) if val_similarity_losses else float('inf')
-    
-    return avg_val_loss, avg_val_sparsity, avg_val_similarity, all_predicted_masks
+    avg_val_loss = sum(val_losses) / len(val_losses)
+    avg_val_sparsity = sum(val_sparsity_losses) / len(val_sparsity_losses)
+    avg_val_similarity = sum(val_similarity_losses) / len(val_similarity_losses)
 
+    return avg_val_loss, avg_val_sparsity, avg_val_similarity, all_predicted_masks
 
 # ============================================================================
 # DEBUG FUNCTIONS
@@ -1408,7 +1375,6 @@ def test_gradient_flow(state: train_state.TrainState, observations: jnp.ndarray,
         print("✗ GRADIENTS ARE STILL ZERO - NEED FURTHER DEBUGGING!")
         print("The issue might be in the differentiable game solver implementation.")
         return False
-
 
 # ============================================================================
 # ENHANCED TRAINING FUNCTIONS
@@ -1538,8 +1504,6 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
             # Close similarity progress bar
             similarity_pbar.close()
             
-
-            
             # Update batch progress bar
             batch_pbar.set_postfix({
                 'Loss': f'{float(loss):.4f}',
@@ -1558,14 +1522,6 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
                 'σ1': f'{current_sigma1:.3f}'
             })
             training_pbar.update(1)
-            
-            # Analyze training masks every 10 batches to see if they're learning
-            if batch_idx % 10 == 0:
-                # Get predicted masks for this batch
-                predicted_masks = state.apply_fn({'params': state.params}, observations)
-                mask_mean = jnp.mean(predicted_masks, axis=0)
-                mask_std = jnp.std(predicted_masks, axis=0)
-        
         # Close batch progress bar
         batch_pbar.close()
         
@@ -1576,32 +1532,6 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         validation_losses.append(val_loss)
         validation_sparsity_losses.append(val_sparsity_loss)
         validation_similarity_losses.append(val_similarity_loss)
-        
-        # Analyze mask outputs during validation
-        if val_masks:
-            # Flatten all masks from all batches
-            all_masks_flat = []
-            for batch_masks in val_masks:
-                all_masks_flat.extend(batch_masks)
-            
-            if all_masks_flat:
-                all_masks_array = jnp.array(all_masks_flat)
-                mask_mean = jnp.mean(all_masks_array, axis=0)
-                mask_std = jnp.std(all_masks_array, axis=0)
-                mask_min = jnp.min(all_masks_array, axis=0)
-                mask_max = jnp.max(all_masks_array, axis=0)
-                
-                # Store mask statistics for comparison between epochs
-                if not hasattr(validation_step, 'previous_masks'):
-                    validation_step.previous_masks = None
-                
-                if validation_step.previous_masks is not None:
-                    # Compare with previous epoch
-                    prev_masks = jnp.array(validation_step.previous_masks)
-                    mask_diff = jnp.mean(jnp.abs(all_masks_array - prev_masks))
-                
-                # Store current masks for next comparison
-                validation_step.previous_masks = all_masks_flat
         
         # Calculate average loss for the epoch
         avg_loss = sum(epoch_losses) / len(epoch_losses)
@@ -1670,53 +1600,6 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         gc.collect()
         if hasattr(jax, 'clear_caches'):
             jax.clear_caches()
-        
-        # Save training progress plot every 5 epochs
-        if (epoch + 1) % 5 == 0 or epoch == num_epochs - 1:
-            plt.figure(figsize=(16, 12))
-            
-            # Main training and validation loss
-            plt.subplot(2, 2, 1)
-            plt.plot(training_losses, label='Training Loss')
-            plt.plot(validation_losses, label='Validation Loss')
-            plt.title(f'PSN Training & Validation Loss (Epoch {epoch+1}/{num_epochs})')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.legend()
-            plt.grid(True)
-            
-            # Sparsity loss over epochs
-            plt.subplot(2, 2, 2)
-            plt.plot(sparsity_losses, label='Training Sparsity Loss')
-            plt.plot(validation_sparsity_losses, label='Validation Sparsity Loss')
-            plt.title('Sparsity Loss Over Epochs')
-            plt.xlabel('Epoch')
-            plt.ylabel('Sparsity Loss')
-            plt.legend()
-            plt.grid(True)
-            
-            # Similarity loss over epochs
-            plt.subplot(2, 2, 3)
-            plt.plot(similarity_losses, label='Training Similarity Loss')
-            plt.plot(validation_similarity_losses, label='Validation Similarity Loss')
-            plt.title('Similarity Loss Over Epochs')
-            plt.xlabel('Epoch')
-            plt.ylabel('Similarity Loss')
-            plt.legend()
-            plt.grid(True)
-            
-            # Training loss components
-            plt.subplot(2, 2, 4)
-            plt.plot(training_losses, label='Total Loss')
-            plt.plot(sparsity_losses, label='Sparsity Loss')
-            plt.plot(similarity_losses, label='Similarity Loss')
-            plt.title('Training Loss Components')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.legend()
-            plt.grid(True)
-            
-            plt.tight_layout()
     
     # Close progress bar
     training_pbar.close()
@@ -1727,7 +1610,6 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
     print(f"\nTraining completed! Best model found at epoch {best_epoch + 1} with loss: {best_loss:.4f}")
     
     return training_losses, validation_losses, sparsity_losses, similarity_losses, validation_sparsity_losses, validation_similarity_losses, state, log_dir, best_loss, best_epoch
-
 
 # ============================================================================
 # MODEL LOADING UTILITIES
@@ -1771,7 +1653,6 @@ def load_trained_models(psn_model_path: str, goal_model_path: str) -> Tuple[Play
     print("✓ Goal inference model loaded successfully")
     
     return psn_model, psn_trained_state, goal_model, goal_trained_state
-
 
 # ============================================================================
 # MAIN EXECUTION

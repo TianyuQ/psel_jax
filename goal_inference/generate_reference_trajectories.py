@@ -51,7 +51,7 @@ print(f"Using device: {device}")
 
 # Extract parameters from configuration
 dt = config.game.dt
-tsteps = config.game.T_steps
+tsteps = config.game.T_total
 n_agents = config.game.N_agents
 
 # Optimization parameters
@@ -290,9 +290,6 @@ def solve_ilqgames_iterative(agents: list,
     # Initialize control trajectories with zeros
     control_trajectories = [jnp.zeros((tsteps, 2)) for _ in range(n_agents)]
     
-    # Track losses for debugging
-    total_losses = []
-    
     for iter in range(num_iters + 1):
         # Step 1: Linearize dynamics for all agents
         state_trajectories = []
@@ -328,21 +325,6 @@ def solve_ilqgames_iterative(agents: list,
                 A_trajectories[i], B_trajectories[i], 
                 a_trajectories[i], b_trajectories[i])
             control_updates.append(v_traj)
-        
-        # Step 4: Update control trajectories
-        if iter % 20 == 0:
-            # Compute total loss for monitoring
-            total_loss = 0.0
-            for i in range(n_agents):
-                other_states = [state_trajectories[j] for j in range(n_agents) if j != i]
-                agent_loss = compiled_functions[i]['loss'](
-                    state_trajectories[i], control_trajectories[i],
-                    reference_trajectories[i], other_states)
-                total_loss += agent_loss
-            
-            total_losses.append(total_loss)
-            if iter % 40 == 0:  # Print less frequently
-                print(f"  Iteration {iter}/{num_iters}, Total Loss: {total_loss:.3f}")
         
         # Update control trajectories with gradient descent
         for i in range(n_agents):
@@ -468,7 +450,7 @@ def plot_sample_trajectories(sample_data: Dict[str, Any], boundary_size: float, 
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to: {save_path}")
+        # print(f"Plot saved to: {save_path}")
     
     # Don't show the plot during generation
     plt.close()
@@ -537,9 +519,6 @@ def generate_reference_trajectories(num_samples: int, save_dir: str = "reference
         plot_sample_trajectories(sample_data, boundary_size, str(plot_path))
         
         elapsed_time = time.time() - start_time
-        if sample_id % 10 == 0 or sample_id < 5:  # Report timing for first few and every 10th
-            print(f"  ✓ Completed in {elapsed_time:.2f}s (Game solved in {total_time:.2f}s)")
-            print(f"  ✓ Saved: {json_filename}, {plot_filename}")
     
     print(f"\nGenerated {len(all_samples)} samples successfully!")
     print(f"Individual files saved to: {save_path}")

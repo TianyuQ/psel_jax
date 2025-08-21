@@ -94,10 +94,41 @@ def load_config(config_path: Optional[str] = None) -> ConfigLoader:
         with open(config_path, 'r') as f:
             config_dict = yaml.safe_load(f)
         
+        # Process variable substitutions
+        config_dict = _process_variable_substitutions(config_dict)
+        
         return ConfigLoader(config_dict)
     
     except yaml.YAMLError as e:
         raise yaml.YAMLError(f"Error parsing configuration file {config_path}: {e}")
+
+
+def _process_variable_substitutions(config_dict: dict) -> dict:
+    """
+    Process variable substitutions in configuration values.
+    Currently supports: ${N_agents} -> actual number of agents
+    
+    Args:
+        config_dict: Configuration dictionary
+        
+    Returns:
+        Processed configuration dictionary
+    """
+    def substitute_variables(value, n_agents):
+        if isinstance(value, str):
+            return value.replace("${N_agents}", str(n_agents))
+        elif isinstance(value, dict):
+            return {k: substitute_variables(v, n_agents) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [substitute_variables(item, n_agents) for item in value]
+        else:
+            return value
+    
+    # Get N_agents value for substitution
+    n_agents = config_dict.get('game', {}).get('N_agents', 4)
+    
+    # Process substitutions
+    return substitute_variables(config_dict, n_agents)
 
 
 def get_device_config():
@@ -167,8 +198,8 @@ def create_log_dir(base_name: str, config: Optional[ConfigLoader] = None) -> Pat
     # Create structured directory name based on key parameters
     if base_name == "goal_inference":
         dir_name = (f"goal_inference_N_{config.game.N_agents}_"
-                   f"T_{config.game.T_steps}_"
-                   f"obs_{config.goal_inference.observation_length}_"
+                   f"T_{config.game.T_total}_"
+                   f"obs_{config.game.T_observation}_"
                    f"lr_{config.goal_inference.learning_rate}_"
                    f"bs_{config.goal_inference.batch_size}_"
                    f"goal_loss_weight_{config.goal_inference.goal_loss_weight}_"
@@ -176,7 +207,7 @@ def create_log_dir(base_name: str, config: Optional[ConfigLoader] = None) -> Pat
     
     elif base_name == "psn":
         dir_name = (f"psn_N_{config.game.N_agents}_"
-                   f"T_{config.game.T_steps}_"
+                   f"T_{config.game.T_total}_"
                    f"obs_{config.goal_inference.observation_length}_"
                    f"lr_{config.psn.learning_rate}_"
                    f"bs_{config.psn.batch_size}_"
@@ -211,7 +242,7 @@ def get_data_paths(config: Optional[ConfigLoader] = None) -> Dict[str, Path]:
     base_path = Path.cwd()
     
     paths = {
-        'reference_data': base_path / config.get('paths.reference_data_dir', 'reference_trajectories_4p'),
+        'reference_data': base_path / config.get('paths.reference_data_dir', 'reference_trajectories_10p'),
         'models': base_path / config.get('paths.models_dir', 'models'),
         'checkpoints': base_path / config.get('paths.checkpoints_dir', 'checkpoints'),
         'results': base_path / config.get('paths.results_dir', 'results'),
