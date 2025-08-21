@@ -1,0 +1,253 @@
+# ============================================================================
+# Configuration File for Player Selection Network (PSN) Project
+# ============================================================================
+# This file contains all parameters and hyperparameters used across:
+# - Reference trajectory generation
+# - PSN training 
+# - Goal inference pretraining
+# - Testing and evaluation scripts
+# ============================================================================
+
+# ============================================================================
+# GLOBAL GAME PARAMETERS
+# ============================================================================
+game:
+  # Time discretization
+  dt: 0.1                    # Time step size (seconds)
+  T_receding_horizon_planning: 15            # Planning horizon for each individual game
+  T_receding_horizon_iterations: 50               # Total number of receding horizon iterations
+  T_total: 50               # Total number of time steps in trajectory (T_receding_horizon_planning * T_receding_horizon_iterations)
+  T_observation: 10         # Number of steps to observe before solving the game
+
+  # Agent configuration
+  N_agents: 4               # Total number of agents in the game
+  ego_agent_id: 0           # ID of the ego agent (usually 0)
+  
+  # State and control dimensions
+  state_dim: 4              # [x, y, vx, vy] for point mass agents
+  control_dim: 2            # [ax, ay] for point mass agents
+  
+  # Environment parameters
+  # Boundary sizes are auto-determined: ±2.5m for ≤4 agents, ±3.5m for >4 agents
+  velocity_scale: [1.0, 0.5] # Velocity scaling for control cost
+
+# ============================================================================
+# OPTIMIZATION PARAMETERS
+# ============================================================================
+optimization:
+  # iLQGames solver parameters
+  num_iters: 50            # Number of iterations for iLQGames solver  
+  step_size: 0.005          # Step size for gradient descent
+  
+  # Convergence criteria
+  tolerance: 1e-6           # Convergence tolerance for solver
+  max_line_search: 10       # Maximum line search iterations
+  
+  # Cost function weights
+  navigation_weight: 1.0    # Weight for navigation cost
+  collision_weight: 1.0    # Weight for collision avoidance
+  collision_scale: 1.0      # Scale factor in exponential collision cost
+  control_weight: 0.1       # Weight for control cost
+
+# ============================================================================
+# REFERENCE TRAJECTORY GENERATION
+# ============================================================================
+reference_generation:
+  # Data generation parameters
+  num_samples: 512           # Number of reference trajectory samples to generate
+  save_dir: "reference_trajectories_4p"  # Directory to save reference trajectories
+  
+  # Trajectory type
+  trajectory_type: "linear" # Type of reference trajectory ["linear", "spline", "polynomial"]
+  
+  # Visualization
+  save_plots: true          # Whether to save trajectory plots
+  plot_format: "png"        # Plot format ["png", "pdf", "svg"]
+  plot_dpi: 300             # Plot resolution
+
+# ============================================================================
+# GOAL INFERENCE NETWORK PARAMETERS
+# ============================================================================
+goal_inference:
+  # Network architecture
+  hidden_dims: [64, 64, 32] # Hidden layer dimensions
+  activation: "relu"        # Activation function ["relu", "tanh", "swish"]
+  dropout_rate: 0.1         # Dropout rate during training
+  
+  # Training parameters
+  learning_rate: 0.001      # Learning rate for Adam optimizer
+  batch_size: 32            # Batch size for training
+  num_epochs: 1000          # Number of training epochs
+  
+  # Loss function weights
+  goal_loss_weight: 1.0     # Weight for goal prediction loss
+  regularization_weight: 0.001  # L2 regularization weight
+  
+  # Data parameters
+  observation_length: 10    # Length of observation history (K_observation)
+  
+  # Early stopping
+  patience: 50              # Patience for early stopping
+  min_delta: 1e-4          # Minimum change for early stopping
+
+# ============================================================================
+# PLAYER SELECTION NETWORK PARAMETERS
+# ============================================================================
+psn:
+  # Network architecture
+  hidden_dims: [128, 64, 32] # Hidden layer dimensions for PSN
+  output_dim_per_agent: 8   # Output dimension per other agent
+  activation: "relu"        # Activation function
+  use_batch_norm: true      # Whether to use batch normalization
+  dropout_rate: 0.1         # Dropout rate
+  
+  # Training parameters
+  learning_rate: 0.001      # Learning rate for Adam optimizer
+  batch_size: 32            # Batch size for training
+  num_epochs: 300            # Number of training epochs
+  warmup_epochs: 10          # Number of warmup epochs
+  
+  # Loss function weights
+  sigma1: 0.05              # Weight for mask sparsity loss (negative = encourage sparsity)
+  sigma2: 0.0               # Weight for mask diversity loss
+  
+  # Mask parameters
+  mask_threshold: 0.5       # Threshold for converting continuous to binary mask
+  temperature: 1.0          # Temperature for Gumbel-Softmax
+  hard_gumbel: false        # Whether to use hard Gumbel-Softmax
+  
+  # Scheduler parameters
+  scheduler_factor: 0.5     # Factor for learning rate reduction
+  scheduler_patience: 10    # Patience for learning rate scheduler
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # General training settings
+  seed: 42                  # Random seed for reproducibility
+  use_gpu: true             # Whether to use GPU if available
+  mixed_precision: false    # Whether to use mixed precision training
+  
+  # Data loading
+  num_workers: 4            # Number of data loading workers
+  prefetch_factor: 2        # Prefetch factor for data loading
+  
+  # Logging and monitoring
+  log_interval: 10          # Interval for logging training metrics
+  eval_interval: 50         # Interval for evaluation during training
+  save_interval: 100        # Interval for saving checkpoints
+  
+  # TensorBoard logging
+  tensorboard_log: true     # Whether to enable TensorBoard logging
+  log_dir: "log"            # Base directory for logs
+  
+  # Model saving
+  save_best_only: true      # Whether to save only the best model
+  model_save_format: "pkl"  # Format for saving models ["pkl", "flax"]
+
+# ============================================================================
+# TESTING AND EVALUATION
+# ============================================================================
+testing:
+  # Test data parameters
+  num_test_samples: 10      # Number of test samples to evaluate
+  test_data_dir: "reference_trajectories_4p"  # Directory with test data
+  
+  # Model paths for testing
+  psn_model: "log/goal_inference_N_4_T_50_obs_10_lr_0.001_bs_32_goal_loss_weight_1.0_epochs_1000/psn_pretrained_goals_N_4_T_50_obs_10_lr_0.001_bs_32_sigma1_0.05_sigma2_0.0_epochs_300/psn_best_model.pkl"
+  goal_inference_model: "log/goal_inference_N_4_T_50_obs_10_lr_0.001_bs_32_goal_loss_weight_1.0_epochs_1000/goal_inference_best_model.pkl"
+  
+  # Receding horizon testing parameters
+  receding_horizon:
+    # Two-phase approach configuration
+    initial_stabilization_iterations: 10  # First 10 iterations use ground truth goals and all agents
+    mask_threshold: 0.3                  # Threshold for agent selection (0.05 -> 0.3)
+    mask_sparsity_calculation: "fraction" # How to calculate mask sparsity ["fraction", "ratio"]
+    
+    # Testing configuration
+    num_samples: 1                      # Number of samples to test (2 -> 10)
+    output_dir: "receding_horizon_test_results"  # Directory for test results
+    
+    # Visualization settings
+    create_gif: true                     # Whether to create trajectory GIFs
+    gif_duration: 0.5                    # Duration per frame in seconds
+    gif_loop: 0                          # Number of loops (0 = infinite)
+    
+    # Performance monitoring
+    track_computation_time: true         # Whether to track game solving time
+    save_detailed_results: true          # Whether to save detailed iteration results
+  
+  # Evaluation metrics
+  compute_trajectory_error: true    # Whether to compute trajectory tracking error
+  compute_collision_rate: true      # Whether to compute collision statistics
+  compute_goal_accuracy: true       # Whether to compute goal prediction accuracy
+  
+  # Visualization
+  create_animations: true           # Whether to create trajectory animations
+  save_comprehensive_plots: true   # Whether to save detailed analysis plots
+  animation_fps: 10                 # FPS for animations
+  
+  # Output directories
+  results_dir: "test_results"       # Directory for test results
+  plots_dir: "test_plots"           # Directory for test plots
+
+# ============================================================================
+# SCALABILITY TESTING
+# ============================================================================
+scalability:
+  # Test parameters
+  min_players: 2            # Minimum number of players to test
+  max_players: 30           # Maximum number of players to test
+  num_trials: 3             # Number of trials per player count
+  reduced_iters: 50         # Reduced iterations for scalability testing
+  
+  # Performance monitoring
+  memory_profiling: true    # Whether to profile memory usage
+  time_profiling: true      # Whether to profile computation time
+
+# ============================================================================
+# PATHS AND DIRECTORIES
+# ============================================================================
+paths:
+  # Data directories
+  reference_data_dir: "reference_trajectories_4p"
+  goal_inference_data_dir: "reference_trajectories_4p"
+  
+  # Model directories
+  models_dir: "models"
+  checkpoints_dir: "checkpoints"
+  
+  # Output directories
+  results_dir: "results"
+  logs_dir: "log"
+  plots_dir: "plots"
+
+# ============================================================================
+# DEBUGGING AND DEVELOPMENT
+# ============================================================================
+debug:
+  # Debug mode settings
+  debug_mode: false         # Whether to run in debug mode
+  small_dataset: false      # Whether to use a small dataset for debugging
+  verbose_logging: false    # Whether to enable verbose logging
+  
+  # Memory and performance
+  jax_debug_nans: false     # Whether to enable JAX NaN debugging
+  jax_disable_jit: false    # Whether to disable JIT compilation for debugging
+  
+  # Gradient checking
+  check_gradients: false    # Whether to perform gradient checking
+  gradient_clip_value: 1.0  # Value for gradient clipping
+
+# ============================================================================
+# DEVICE CONFIGURATION
+# ============================================================================
+device:
+  # Device selection
+  preferred_device: "gpu"   # Preferred device ["gpu", "cpu", "auto"]
+  gpu_memory_fraction: 0.9  # Fraction of GPU memory to use
+  
+  # JAX configuration
+  jax_enable_x64: false     # Whether to enable 64-bit precision
+  jax_platform_name: null  # JAX platform name (null = auto-detect)
