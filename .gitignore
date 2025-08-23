@@ -176,6 +176,7 @@ cython_debug/
 .vscode/*
 
 *.png
+*.gif
 *.json
 *.txt
 *.pkl

@@ -968,24 +968,92 @@ if __name__ == "__main__":
     print("RECEDING HORIZON TESTING WITH GOAL INFERENCE AND PLAYER SELECTION MODELS")
     print("=" * 80)
     
-    # Model paths from config
-    psn_model_path = config.testing.psn_model
-    goal_model_path = config.testing.goal_inference_model
+    # Model paths from config - use templates to generate paths
+    psn_model_path = config.testing.psn_model_template.format(
+            N_agents=config.game.N_agents,
+            T_total=config.game.T_total,
+            T_observation=config.goal_inference.observation_length,
+            goal_inference_lr=config.goal_inference.learning_rate,
+            batch_size=config.goal_inference.batch_size,
+            goal_loss_weight=config.goal_inference.goal_loss_weight,
+            num_epochs=config.goal_inference.num_epochs,
+            psn_lr=config.psn.learning_rate,
+            sigma1=config.psn.sigma1,
+            sigma2=config.psn.sigma2,
+            psn_epochs=config.psn.num_epochs
+        )
+    
+    goal_model_path = config.testing.goal_inference_model_template.format(
+            N_agents=config.game.N_agents,
+            T_total=config.game.T_total,
+            T_observation=config.goal_inference.observation_length,
+            learning_rate=config.goal_inference.learning_rate,
+            batch_size=config.goal_inference.batch_size,
+            goal_loss_weight=config.goal_inference.goal_loss_weight,
+            num_epochs=config.goal_inference.num_epochs
+        )
+    
+    # Check if models exist
+    if psn_model_path is None or not os.path.exists(psn_model_path):
+        print(f"Error: PSN model not found at: {psn_model_path}")
+        print("Please train a PSN model first using: python3 player_selection_network/psn_training_with_pretrained_goals.py")
+        exit(1)
+    
+    if goal_model_path is None or not os.path.exists(goal_model_path):
+        print(f"Error: Goal inference model not found at: {goal_model_path}")
+        print("Please train a goal inference model first using: python3 goal_inference/pretrain_goal_inference.py")
+        exit(1)
+    
     reference_file = "reference_trajectories_4p"
+    
+    # Create output directory under the PSN model directory
+    psn_model_dir = os.path.dirname(psn_model_path)
+    output_dir = os.path.join(psn_model_dir, config.testing.receding_horizon.output_dir)
+    os.makedirs(output_dir, exist_ok=True)
     
     print(f"Using models:")
     print(f"  PSN Model: {psn_model_path}")
     print(f"  Goal Model: {goal_model_path}")
     print(f"  Reference Data: {reference_file}")
+    print(f"  Results will be saved to: {output_dir}")
     
     # Run testing
     results = run_receding_horizon_testing(
         psn_model_path=psn_model_path,
         goal_model_path=goal_model_path,
         reference_file=reference_file,
-        output_dir=config.testing.receding_horizon.output_dir,
+        output_dir=output_dir,
         num_samples=config.testing.receding_horizon.num_samples
     )
     
+    # Create summary file explaining the model relationships
+    summary_path = os.path.join(output_dir, "test_summary.txt")
+    with open(summary_path, 'w') as f:
+        f.write("Receding Horizon Testing with Integrated Models\n")
+        f.write("=" * 60 + "\n\n")
+        f.write("Model Configuration:\n")
+        f.write(f"  - Goal Inference Model: {goal_model_path}\n")
+        f.write(f"  - PSN Model: {psn_model_path}\n")
+        f.write(f"  - Reference Data: {reference_file}\n\n")
+        f.write("Test Configuration:\n")
+        f.write(f"  - Number of samples: {config.testing.receding_horizon.num_samples}\n")
+        f.write(f"  - Receding horizon iterations: {T_receding_horizon_iterations}\n")
+        f.write(f"  - Planning horizon per game: {T_receding_horizon_planning}\n")
+        f.write(f"  - Total trajectory steps: {T_total}\n")
+        f.write(f"  - Observation steps: {T_observation}\n")
+        f.write(f"  - Number of agents: {n_agents}\n\n")
+        f.write("Results:\n")
+        f.write(f"  - Successfully tested: {len(results)} samples\n")
+        f.write(f"  - Output directory: {output_dir}\n\n")
+        f.write("Directory Structure:\n")
+        f.write(f"  Goal Inference: {os.path.dirname(goal_model_path)}\n")
+        f.write(f"  PSN Training: {psn_model_dir}\n")
+        f.write(f"  Receding Horizon Test: {output_dir}\n")
+    
     print(f"\nReceding horizon testing completed!")
     print(f"Generated {len(results)} test results with integrated models.")
+    print(f"Results saved to: {output_dir}")
+    print(f"Summary file: {summary_path}")
+    print(f"\nDirectory organization:")
+    print(f"  Goal Inference → PSN Training → Receding Horizon Test")
+    print(f"  {os.path.basename(os.path.dirname(goal_model_path))} → {os.path.basename(psn_model_dir)} → {os.path.basename(output_dir)}")

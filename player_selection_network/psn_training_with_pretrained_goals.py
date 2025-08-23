@@ -128,7 +128,29 @@ num_iters = config.optimization.num_iters
 reference_dir = config.paths.reference_data_dir
 
 # Pretrained goal inference model path
-pretrained_goal_model_path = config.testing.goal_inference_model
+# Use the template to generate the path based on current config parameters
+pretrained_goal_model_path = config.testing.goal_inference_model_template.format(
+        N_agents=config.game.N_agents,
+        T_total=config.game.T_total,
+        T_observation=config.goal_inference.observation_length,
+        learning_rate=config.goal_inference.learning_rate,
+        batch_size=config.goal_inference.batch_size,
+        goal_loss_weight=config.goal_inference.goal_loss_weight,
+        num_epochs=config.goal_inference.num_epochs
+    )
+
+# Set hidden dimensions based on number of agents for both networks
+if N_agents == 4:
+    goal_inference_hidden_dims = config.goal_inference.hidden_dims_4p
+    psn_hidden_dims = config.psn.hidden_dims_4p
+elif N_agents == 10:
+    goal_inference_hidden_dims = config.goal_inference.hidden_dims_10p
+    psn_hidden_dims = config.psn.hidden_dims_10p
+else:
+    # Default fallback to 4p dimensions
+    goal_inference_hidden_dims = config.goal_inference.hidden_dims_4p
+    psn_hidden_dims = config.psn.hidden_dims_4p
+    print(f"Warning: Using 4p hidden dimensions for {N_agents} agents")
 
 # Device selection - Use config preference
 if config.device.preferred_device == "gpu":
@@ -161,7 +183,7 @@ else:
 class GoalInferenceNetwork(nn.Module):
     """Goal inference network for predicting agent goals from observation trajectories."""
     
-    hidden_dim: int = 128  # Must match pretrained model (hardcoded - model expects 128 not 64)
+    hidden_dims: List[int]
     goal_output_dim: int = N_agents * 2  # goal_dim = 2 for (x, y)
     
     @nn.compact
@@ -187,16 +209,16 @@ class GoalInferenceNetwork(nn.Module):
         # Flatten all agent states
         x = x.reshape(batch_size, N_agents * state_dim)
         
-        # Feature extraction layers
-        x = nn.Dense(features=self.hidden_dim)(x)
+        # Feature extraction layers using the full hidden_dims list
+        x = nn.Dense(features=self.hidden_dims[0])(x)
         x = nn.relu(x)
         x = nn.Dropout(rate=config.goal_inference.dropout_rate)(x, deterministic=deterministic)
         
-        x = nn.Dense(features=self.hidden_dim // 2)(x)
+        x = nn.Dense(features=self.hidden_dims[1])(x)
         x = nn.relu(x)
         x = nn.Dropout(rate=config.goal_inference.dropout_rate)(x, deterministic=deterministic)
         
-        x = nn.Dense(features=self.hidden_dim // 4)(x)
+        x = nn.Dense(features=self.hidden_dims[2])(x)
         x = nn.relu(x)
         
         # Goal prediction output
@@ -240,7 +262,7 @@ class PlayerSelectionNetwork(nn.Module):
     Output: Binary mask for selecting other agents (excluding ego agent)
     """
     
-    hidden_dim: int = config.psn.hidden_dims[0]
+    hidden_dims: List[int]
     mask_output_dim: int = N_agents - 1  # Mask for other agents (excluding ego)
     
     @nn.compact
@@ -264,10 +286,10 @@ class PlayerSelectionNetwork(nn.Module):
         # Flatten all agent states
         x = x.reshape(batch_size, N_agents * state_dim)
         
-        # Feature extraction layers
-        x = nn.Dense(features=self.hidden_dim)(x)
+        # Feature extraction layers using the full hidden_dims list
+        x = nn.Dense(features=self.hidden_dims[0])(x)
         x = nn.relu(x)
-        x = nn.Dense(features=self.hidden_dim // 2)(x)
+        x = nn.Dense(features=self.hidden_dims[1])(x)
         x = nn.relu(x)
         
         # Mask output
@@ -1078,7 +1100,7 @@ def load_pretrained_goal_model(model_path: str) -> Tuple[GoalInferenceNetwork, t
     print(f"Loading pretrained goal inference model from: {model_path}")
     
     # Create model instance
-    goal_model = GoalInferenceNetwork()
+    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims)
     
     # Load trained parameters
     with open(model_path, 'rb') as f:
@@ -1526,7 +1548,6 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         batch_pbar.close()
         
         # Perform validation
-        print(f"\nRunning validation for epoch {epoch + 1}...")
         val_loss, val_sparsity_loss, val_similarity_loss, val_masks = validation_step(
             state, validation_data, goal_model, goal_trained_state, batch_size)
         validation_losses.append(val_loss)
@@ -1633,7 +1654,7 @@ def load_trained_models(psn_model_path: str, goal_model_path: str) -> Tuple[Play
         psn_model_bytes = pickle.load(f)
     
     # Create the PSN model
-    psn_model = PlayerSelectionNetwork()
+    psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims)
     
     # Deserialize the PSN state
     psn_trained_state = flax.serialization.from_bytes(psn_model, psn_model_bytes)
@@ -1646,7 +1667,7 @@ def load_trained_models(psn_model_path: str, goal_model_path: str) -> Tuple[Play
         goal_model_bytes = pickle.load(f)
     
     # Create the goal inference model
-    goal_model = GoalInferenceNetwork()
+    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims)
     
     # Deserialize the goal inference state
     goal_trained_state = flax.serialization.from_bytes(goal_model, goal_model_bytes)
@@ -1671,7 +1692,7 @@ if __name__ == "__main__":
     goal_model, goal_trained_state = load_pretrained_goal_model(pretrained_goal_model_path)
     
     # Create PSN model
-    psn_model = PlayerSelectionNetwork()
+    psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims)
     
     # Train PSN with pretrained goals
     training_losses, validation_losses, sparsity_losses, similarity_losses, validation_sparsity_losses, validation_similarity_losses, trained_state, log_dir, best_loss, best_epoch = train_psn_with_pretrained_goals(

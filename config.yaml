@@ -20,7 +20,7 @@ game:
   T_observation: 10         # Number of steps to observe before solving the game
 
   # Agent configuration
-  N_agents: 10               # Total number of agents in the game
+  N_agents: 4               # Total number of agents in the game
   ego_agent_id: 0           # ID of the ego agent (usually 0)
   
   # State and control dimensions
@@ -79,7 +79,7 @@ goal_inference:
   # Training parameters
   learning_rate: 0.001      # Learning rate for Adam optimizer
   batch_size: 32            # Batch size for training
-  num_epochs: 400          # Number of training epochs
+  num_epochs: 1000          # Number of training epochs
   
   # Loss function weights
   goal_loss_weight: 1.0     # Weight for goal prediction loss
@@ -108,11 +108,11 @@ psn:
   # Training parameters
   learning_rate: 0.002      # Learning rate for Adam optimizer
   batch_size: 32            # Batch size for training
-  num_epochs: 1            # Number of training epochs
+  num_epochs: 200            # Number of training epochs
   
   # Loss function weights
   sigma1: 0.1              # Weight for mask sparsity loss
-  sigma2: 0.0               # Weight for mask diversity loss
+  sigma2: 0.2               # Weight for mask diversity loss
   
   # Mask parameters
   mask_threshold: 0.5       # Threshold for converting continuous to binary mask
@@ -160,7 +160,7 @@ testing:
   # Model paths for testing
   # These are template paths that will be dynamically filled based on actual parameters
   # Format: log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/
-  psn_model_template: "log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/psn_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{psn_epochs}/psn_best_model.pkl"
+  psn_model_template: "log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{goal_inference_lr}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/psn_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{psn_lr}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{psn_epochs}/psn_best_model.pkl"
   goal_inference_model_template: "log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/goal_inference_best_model.pkl"
   
   # Default model paths (fallback for when templates can't be resolved)
@@ -175,8 +175,8 @@ testing:
     mask_sparsity_calculation: "fraction" # How to calculate mask sparsity ["fraction", "ratio"]
     
     # Testing configuration
-    num_samples: 1                      # Number of samples to test (2 -> 10)
-    output_dir: "receding_horizon_test_results"  # Directory for test results
+    num_samples: 5                      # Number of samples to test (2 -> 10)
+    output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Visualization settings
     create_gif: true                     # Whether to create trajectory GIFs
@@ -226,7 +226,7 @@ testing:
 #     goal_inference_model_path = config.testing.goal_inference_model_template.format(
 #         N_agents=config.game.N_agents,
 #         T_total=config.game.T_total,
-#         T_observation=config.game.T_observation,
+#         T_observation=config.goal_inference.observation_length,  # Use observation_length, not game.T_observation
 #         learning_rate=config.goal_inference.learning_rate,
 #         batch_size=config.goal_inference.batch_size,
 #         goal_loss_weight=config.goal_inference.goal_loss_weight,
@@ -307,7 +307,7 @@ device:
 #   psn_model_path = config.testing.psn_model_template.format(
 #       N_agents=config.game.N_agents,
 #       T_total=config.game.T_total,
-#       T_observation=config.game.T_observation,
+#       T_observation=config.goal_inference.observation_length,  # Use observation_length, not game.T_observation
 #       learning_rate=config.goal_inference.learning_rate,
 #       batch_size=config.goal_inference.batch_size,
 #       goal_loss_weight=config.goal_inference.goal_loss_weight,
