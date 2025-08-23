@@ -71,10 +71,11 @@ reference_generation:
 goal_inference:
   # Network architecture
   # Hidden layer dimensions: [128, 64, 32] for 4 players, [256, 128, 64] for 10 players
-  hidden_dims_4p: [128, 64, 32]    # Hidden dimensions for 4 players
-  hidden_dims_10p: [256, 128, 64]  # Hidden dimensions for 10 players
+  hidden_dims_4p: [64, 32]          # Hidden dimensions for MLP head (reduced for GRU version)
+  hidden_dims_10p: [128, 64]        # Hidden dimensions for MLP head (reduced for GRU version)
+  gru_hidden_size: 64               # GRU hidden size for temporal processing
   activation: "relu"        # Activation function ["relu", "tanh", "swish"]
-  dropout_rate: 0.1         # Dropout rate during training
+  dropout_rate: 0.3         # Dropout rate during training (increased for GRU version)
   
   # Training parameters
   learning_rate: 0.001      # Learning rate for Adam optimizer
@@ -97,13 +98,14 @@ goal_inference:
 # ============================================================================
 psn:
   # Network architecture
-  # Hidden layer dimensions: [128, 64, 32] for 4 players, [256, 128, 64] for 10 players
-  hidden_dims_4p: [128, 64, 32]    # Hidden dimensions for 4 players
-  hidden_dims_10p: [256, 128, 64]  # Hidden dimensions for 10 players
+  # Hidden layer dimensions: [64, 32] for 4 players, [128, 64] for 10 players (reduced for GRU version)
+  hidden_dims_4p: [64, 32]          # Hidden dimensions for MLP head (reduced for GRU version)
+  hidden_dims_10p: [128, 64]        # Hidden dimensions for MLP head (reduced for GRU version)
+  gru_hidden_size: 64               # GRU hidden size for temporal processing
   output_dim_per_agent: 8   # Output dimension per other agent
   activation: "relu"        # Activation function
-  use_batch_norm: true      # Whether to use batch normalization
-  dropout_rate: 0.1         # Dropout rate
+  use_batch_norm: false     # Disabled for GRU version (use dropout instead)
+  dropout_rate: 0.3         # Dropout rate (increased for GRU version)
   
   # Training parameters
   learning_rate: 0.002      # Learning rate for Adam optimizer

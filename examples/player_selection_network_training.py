@@ -98,39 +98,73 @@ class PointAgent(iLQR):
 
 class PlayerSelectionNetwork(nn.Module):
     """
-    Player Selection Network (PSN) that learns to select important agents.
+    Player Selection Network (PSN) using GRU for temporal sequence processing.
     
     Two variants:
     - PSN-Full: Input is all agents' past states x_{0:t}
     - PSN-Partial: Input is partial observation h(x_k)
     """
     
-    hidden_dim: int = 128
+    hidden_dim: int = 64
+    gru_hidden_size: int = 64
+    dropout_rate: float = 0.3
     output_dim: int = N_agents - 1
     
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, deterministic: bool = False):
         """
         Forward pass of the network.
         
         Args:
             x: Input array of shape (batch_size, input_dim)
+            deterministic: Whether to use deterministic mode (no dropout)
             
         Returns:
             mask: Continuous mask array of shape (batch_size, N_agents - 1)
         """
-        # Encoder
-        x = nn.Dense(self.hidden_dim)(x)
+        # Reshape to separate time steps and agents
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size, K_observation, N_agents, 4)  # 4 for [x, y, vx, vy]
+        
+        # Process each agent's trajectory through shared GRU
+        agent_features = []
+        
+        for agent_idx in range(N_agents):
+            # Extract trajectory for this agent: (batch_size, K_observation, 4)
+            agent_traj = x[:, :, agent_idx, :]
+            
+            # Process through shared GRU
+            gru_out, _ = nn.GRUCell(
+                features=self.gru_hidden_size,
+                name=f'shared_gru'
+            ).initialize_carry(jax.random.key(0), (batch_size, self.gru_hidden_size))
+            
+            # Process sequence step by step
+            for t in range(K_observation):
+                gru_out, _ = nn.GRUCell(
+                    features=self.gru_hidden_size,
+                    name=f'shared_gru'
+                )(gru_out, agent_traj[:, t, :])
+            
+            # Use final GRU output as agent representation
+            agent_features.append(gru_out)
+        
+        # Concatenate all agent features: (batch_size, N_agents * gru_hidden_size)
+        x = jnp.concatenate(agent_features, axis=1)
+        
+        # Apply MLP head for mask prediction
+        x = nn.Dense(self.hidden_dim, name='mask_head_1')(x)
         x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
+        x = nn.Dropout(rate=self.dropout_rate, name='mask_dropout_1')(x, deterministic=deterministic)
+        
+        x = nn.Dense(self.hidden_dim // 2, name='mask_head_2')(x)
         x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim // 2)(x)
-        x = nn.relu(x)
+        x = nn.Dropout(rate=self.dropout_rate, name='mask_dropout_2')(x, deterministic=deterministic)
         
         # Mask predictor
-        x = nn.Dense(self.hidden_dim // 4)(x)
+        x = nn.Dense(self.hidden_dim // 4, name='mask_head_3')(x)
         x = nn.relu(x)
-        x = nn.Dense(self.output_dim)(x)
+        x = nn.Dense(self.output_dim, name='mask_output')(x)
         mask = nn.sigmoid(x)  # Output in [0,1]
         
         return mask

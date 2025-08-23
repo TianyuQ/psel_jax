@@ -175,12 +175,14 @@ class PlayerSelectionNetwork(nn.Module):
         - Goal positions for all agents (including ego agent)
     """
     
-    hidden_dim: int = 128
+    hidden_dim: int = 64
+    gru_hidden_size: int = 64
+    dropout_rate: float = 0.3
     mask_output_dim: int = N_agents - 1  # Mask for other agents (excluding ego)
     goal_output_dim: int = N_agents * 2  # Goal positions (x, y) for all agents
     
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, deterministic: bool = False):
         """
         Forward pass of PSN.
         
@@ -197,29 +199,52 @@ class PlayerSelectionNetwork(nn.Module):
         batch_size = x.shape[0]
         x = x.reshape(batch_size, T_observation, N_agents, state_dim)
         
-        # Average over time steps to get a summary representation
-        x = jnp.mean(x, axis=1)  # (batch_size, N_agents, state_dim)
+        # Process each agent's trajectory through shared GRU
+        agent_features = []
         
-        # Flatten all agent states
-        x = x.reshape(batch_size, N_agents * state_dim)
+        for agent_idx in range(N_agents):
+            # Extract trajectory for this agent: (batch_size, T_observation, state_dim)
+            agent_traj = x[:, :, agent_idx, :]
+            
+            # Process through shared GRU
+            gru_out, _ = nn.GRUCell(
+                features=self.gru_hidden_size,
+                name=f'shared_gru'
+            ).initialize_carry(jax.random.key(0), (batch_size, self.gru_hidden_size))
+            
+            # Process sequence step by step
+            for t in range(T_observation):
+                gru_out, _ = nn.GRUCell(
+                    features=self.gru_hidden_size,
+                    name=f'shared_gru'
+                )(gru_out, agent_traj[:, t, :])
+            
+            # Use final GRU output as agent representation
+            agent_features.append(gru_out)
+        
+        # Concatenate all agent features: (batch_size, N_agents * gru_hidden_size)
+        x = jnp.concatenate(agent_features, axis=1)
         
         # Shared feature extraction layers
-        x = nn.Dense(features=self.hidden_dim)(x)
+        x = nn.Dense(features=self.hidden_dim, name='shared_head_1')(x)
         x = nn.relu(x)
-        x = nn.Dense(features=self.hidden_dim // 2)(x)
+        x = nn.Dropout(rate=self.dropout_rate, name='shared_dropout_1')(x, deterministic=deterministic)
+        
+        x = nn.Dense(features=self.hidden_dim // 2, name='shared_head_2')(x)
         x = nn.relu(x)
+        x = nn.Dropout(rate=self.dropout_rate, name='shared_dropout_2')(x, deterministic=deterministic)
         
         # Branch into two outputs: mask and goals
         # Mask branch (for agent selection)
-        mask_branch = nn.Dense(features=self.hidden_dim // 4)(x)
+        mask_branch = nn.Dense(features=self.hidden_dim // 4, name='mask_head')(x)
         mask_branch = nn.relu(mask_branch)
-        mask = nn.Dense(features=self.mask_output_dim)(mask_branch)
+        mask = nn.Dense(features=self.mask_output_dim, name='mask_output')(mask_branch)
         mask = nn.sigmoid(mask)  # Binary mask
         
         # Goal branch (for goal inference)
-        goal_branch = nn.Dense(features=self.hidden_dim // 4)(x)
+        goal_branch = nn.Dense(features=self.hidden_dim // 4, name='goal_head')(x)
         goal_branch = nn.relu(goal_branch)
-        goals = nn.Dense(features=self.goal_output_dim)(goal_branch)
+        goals = nn.Dense(features=self.goal_output_dim, name='goal_output')(goal_branch)
         # No activation for goals - they can be any real values
         
         return mask, goals
@@ -259,7 +284,7 @@ def mask_sparsity_loss(mask: jnp.ndarray) -> jnp.ndarray:
 
 def goal_prediction_loss(predicted_goals: jnp.ndarray, true_goals: jnp.ndarray) -> jnp.ndarray:
     """
-    Goal prediction loss: encourages predicted goals to match true goals.
+    Goal prediction loss using Huber loss for robustness.
     
     Args:
         predicted_goals: Predicted goal positions (batch_size, N_agents * 2)
@@ -268,10 +293,19 @@ def goal_prediction_loss(predicted_goals: jnp.ndarray, true_goals: jnp.ndarray) 
     Returns:
         Goal prediction loss value
     """
-    # Compute mean squared error between predicted and true goals
+    # Compute Huber loss for robustness to outliers
     goal_diff = predicted_goals - true_goals
-    goal_mse = jnp.mean(jnp.square(goal_diff))
-    return goal_mse
+    
+    # Huber loss parameters
+    delta = 1.0
+    
+    # Compute Huber loss: more robust than MSE for outliers
+    abs_diff = jnp.abs(goal_diff)
+    quadratic = jnp.minimum(abs_diff, delta)
+    linear = abs_diff - quadratic
+    huber_loss = 0.5 * quadratic**2 + delta * linear
+    
+    return jnp.mean(huber_loss)
 
 
 def compute_similarity_loss_from_masked_game(sample_data: Dict[str, Any], ego_agent_id: int, 

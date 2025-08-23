@@ -256,22 +256,25 @@ def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
 # ============================================================================
 class PlayerSelectionNetwork(nn.Module):
     """
-    Player Selection Network (PSN) that learns to select important agents.
+    Player Selection Network (PSN) using GRU for temporal sequence processing.
     
     Input: First 10 steps of all agents' trajectories (T_observation * N_agents * state_dim)
     Output: Binary mask for selecting other agents (excluding ego agent)
     """
     
     hidden_dims: List[int]
+    gru_hidden_size: int = 64
+    dropout_rate: float = 0.3
     mask_output_dim: int = N_agents - 1  # Mask for other agents (excluding ego)
     
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, deterministic: bool = False):
         """
         Forward pass of PSN.
         
         Args:
             x: Input tensor of shape (batch_size, T_observation * N_agents * state_dim)
+            deterministic: Whether to use deterministic mode (no dropout)
             
         Returns:
             mask: Binary mask of shape (batch_size, N_agents - 1)
@@ -280,20 +283,41 @@ class PlayerSelectionNetwork(nn.Module):
         batch_size = x.shape[0]
         x = x.reshape(batch_size, T_observation, N_agents, state_dim)
         
-        # Average over time steps to get a summary representation
-        x = jnp.mean(x, axis=1)  # (batch_size, N_agents, state_dim)
+        # Process each agent's trajectory through shared GRU
+        agent_features = []
         
-        # Flatten all agent states
-        x = x.reshape(batch_size, N_agents * state_dim)
+        for agent_idx in range(N_agents):
+            # Extract trajectory for this agent: (batch_size, T_observation, state_dim)
+            agent_traj = x[:, :, agent_idx, :]
+            
+            # Process through shared GRU
+            gru_out, _ = nn.GRUCell(
+                features=self.gru_hidden_size,
+                name=f'shared_gru'
+            ).initialize_carry(jax.random.key(0), (batch_size, self.gru_hidden_size))
+            
+            # Process sequence step by step
+            for t in range(T_observation):
+                gru_out, _ = nn.GRUCell(
+                    features=self.gru_hidden_size,
+                    name=f'shared_gru'
+                )(gru_out, agent_traj[:, t, :])
+            
+            # Use final GRU output as agent representation
+            agent_features.append(gru_out)
         
-        # Feature extraction layers using the full hidden_dims list
-        x = nn.Dense(features=self.hidden_dims[0])(x)
-        x = nn.relu(x)
-        x = nn.Dense(features=self.hidden_dims[1])(x)
-        x = nn.relu(x)
+        # Concatenate all agent features: (batch_size, N_agents * gru_hidden_size)
+        x = jnp.concatenate(agent_features, axis=1)
+        
+        # Apply MLP head for mask prediction
+        for i, hidden_dim in enumerate(self.hidden_dims):
+            x = nn.Dense(features=hidden_dim, name=f'mask_head_{i}')(x)
+            x = nn.relu(x)
+            if i < len(self.hidden_dims) - 1:  # Don't apply dropout to last layer
+                x = nn.Dropout(rate=self.dropout_rate, name=f'mask_dropout_{i}')(x, deterministic=deterministic)
         
         # Mask output
-        mask = nn.Dense(features=self.mask_output_dim)(x)
+        mask = nn.Dense(features=self.mask_output_dim, name='mask_output')(x)
         mask = nn.sigmoid(mask)  # Binary mask
         
         return mask
@@ -1107,7 +1131,7 @@ def load_pretrained_goal_model(model_path: str) -> Tuple[GoalInferenceNetwork, t
         model_bytes = pickle.load(f)
     
     # Recreate train state
-    optimizer = optax.adam(config.goal_inference.learning_rate)  # Dummy optimizer for inference
+    optimizer = optax.adamw(learning_rate=config.goal_inference.learning_rate, weight_decay=5e-4)  # Dummy optimizer for inference
     input_shape = (1, T_observation * N_agents * state_dim)
     dummy_state = create_train_state(goal_model, optimizer, input_shape, jax.random.PRNGKey(config.training.seed))
     
@@ -1218,8 +1242,8 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
     observations, masks, reference_trajectories = batch
     
     def loss_fn(params):
-        # Get predicted mask from PSN
-        predicted_masks = state.apply_fn({'params': params}, observations)
+        # Get predicted mask from PSN (training mode with dropout)
+        predicted_masks = state.apply_fn({'params': params}, observations, deterministic=False)
         
         # Get predicted goals from pretrained goal inference network
         predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations, rng)
@@ -1290,8 +1314,8 @@ def validation_step(state: train_state.TrainState, validation_data: List[Dict[st
         # Prepare batch for validation
         observations, masks, reference_trajectories = prepare_batch_for_training(batch_data)
         
-        # Get predicted mask from PSN (no gradients needed for validation)
-        predicted_masks = state.apply_fn({'params': state.params}, observations)
+        # Get predicted mask from PSN (validation mode, no dropout)
+        predicted_masks = state.apply_fn({'params': state.params}, observations, deterministic=True)
         
         # Store masks for analysis
         all_predicted_masks.append(predicted_masks)
@@ -1430,8 +1454,11 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
     # Initialize TensorBoard writer
     writer = tb.SummaryWriter(log_dir)
     
-    # Create optimizer
-    optimizer = optax.adam(learning_rate)
+    # Create optimizer with weight decay (AdamW)
+    optimizer = optax.adamw(
+        learning_rate=learning_rate,
+        weight_decay=5e-4  # L2 regularization to prevent overfitting
+    )
     
     # Create train state
     input_shape = (batch_size, T_observation * N_agents * state_dim)

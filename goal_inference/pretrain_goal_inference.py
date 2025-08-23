@@ -151,9 +151,11 @@ else:
 # ============================================================================
 
 class GoalInferenceNetwork(nn.Module):
-    """Goal inference network for predicting agent goals from observation trajectories."""
+    """Goal inference network using GRU for temporal sequence processing."""
     
     hidden_dims: List[int]
+    gru_hidden_size: int = 64
+    dropout_rate: float = 0.3
     goal_output_dim: int = N_agents * goal_dim
     
     @nn.compact
@@ -173,26 +175,41 @@ class GoalInferenceNetwork(nn.Module):
         # Reshape to separate time steps and agents
         x = x.reshape(batch_size, T_observation, N_agents, state_dim)
         
-        # Average over time steps to get a summary representation
-        x = jnp.mean(x, axis=1)  # (batch_size, N_agents, state_dim)
+        # Process each agent's trajectory through shared GRU
+        agent_features = []
         
-        # Flatten all agent states
-        x = x.reshape(batch_size, N_agents * state_dim)
+        for agent_idx in range(N_agents):
+            # Extract trajectory for this agent: (batch_size, T_observation, state_dim)
+            agent_traj = x[:, :, agent_idx, :]
+            
+            # Process through shared GRU
+            gru_out, _ = nn.GRUCell(
+                features=self.gru_hidden_size,
+                name=f'shared_gru'
+            ).initialize_carry(jax.random.key(0), (batch_size, self.gru_hidden_size))
+            
+            # Process sequence step by step
+            for t in range(T_observation):
+                gru_out, _ = nn.GRUCell(
+                    features=self.gru_hidden_size,
+                    name=f'shared_gru'
+                )(gru_out, agent_traj[:, t, :])
+            
+            # Use final GRU output as agent representation
+            agent_features.append(gru_out)
         
-        # Feature extraction layers using the full hidden_dims list
-        x = nn.Dense(features=self.hidden_dims[0])(x)
-        x = activation_fn(x)
-        x = nn.Dropout(rate=dropout_rate)(x, deterministic=deterministic)
+        # Concatenate all agent features: (batch_size, N_agents * gru_hidden_size)
+        x = jnp.concatenate(agent_features, axis=1)
         
-        x = nn.Dense(features=self.hidden_dims[1])(x)
-        x = activation_fn(x)
-        x = nn.Dropout(rate=dropout_rate)(x, deterministic=deterministic)
-        
-        x = nn.Dense(features=self.hidden_dims[2])(x)
-        x = activation_fn(x)
+        # Apply MLP head for goal prediction
+        for i, hidden_dim in enumerate(self.hidden_dims):
+            x = nn.Dense(features=hidden_dim, name=f'goal_head_{i}')(x)
+            x = activation_fn(x)
+            if i < len(self.hidden_dims) - 1:  # Don't apply dropout to last layer
+                x = nn.Dropout(rate=self.dropout_rate, name=f'goal_dropout_{i}')(x, deterministic=deterministic)
         
         # Goal prediction output
-        goals = nn.Dense(features=self.goal_output_dim)(x)
+        goals = nn.Dense(features=self.goal_output_dim, name='goal_output')(x)
         # No activation for goals - they can be any real values
         
         return goals
@@ -204,7 +221,7 @@ class GoalInferenceNetwork(nn.Module):
 
 def goal_prediction_loss(predicted_goals: jnp.ndarray, true_goals: jnp.ndarray) -> jnp.ndarray:
     """
-    Goal prediction loss: encourages predicted goals to match true goals.
+    Goal prediction loss using Huber loss for robustness.
     
     Args:
         predicted_goals: Predicted goal positions (batch_size, N_agents * goal_dim)
@@ -218,9 +235,20 @@ def goal_prediction_loss(predicted_goals: jnp.ndarray, true_goals: jnp.ndarray) 
     predicted_goals_reshaped = predicted_goals.reshape(batch_size, N_agents, goal_dim)
     true_goals_reshaped = true_goals.reshape(batch_size, N_agents, goal_dim)
     
-    # Compute per-agent goal error: err_x² + err_y² for each agent
+    # Compute Huber loss for each agent's goal prediction
     goal_diff = predicted_goals_reshaped - true_goals_reshaped  # (batch_size, N_agents, goal_dim)
-    per_agent_error = jnp.sum(jnp.square(goal_diff), axis=2)  # (batch_size, N_agents) - sum over x,y dimensions
+    
+    # Huber loss parameters
+    delta = 1.0
+    
+    # Compute Huber loss: more robust than MSE for outliers
+    abs_diff = jnp.abs(goal_diff)
+    quadratic = jnp.minimum(abs_diff, delta)
+    linear = abs_diff - quadratic
+    huber_loss_per_dim = 0.5 * quadratic**2 + delta * linear
+    
+    # Sum over x,y dimensions for each agent
+    per_agent_error = jnp.sum(huber_loss_per_dim, axis=2)  # (batch_size, N_agents)
     
     # Take mean over N agents for each sample, then mean over all samples
     mean_per_sample = jnp.mean(per_agent_error, axis=1)  # (batch_size,) - mean over agents
@@ -335,8 +363,11 @@ def create_train_state(model: nn.Module, learning_rate: float) -> train_state.Tr
     Returns:
         Train state
     """
-    # Create optimizer
-    optimizer = optax.adam(learning_rate)
+    # Create optimizer with weight decay (AdamW)
+    optimizer = optax.adamw(
+        learning_rate=learning_rate,
+        weight_decay=5e-4  # L2 regularization to prevent overfitting
+    )
     
     # Create dummy input for initialization
     input_shape = (batch_size, T_observation * N_agents * state_dim)
