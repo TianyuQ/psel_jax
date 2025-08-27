@@ -122,23 +122,24 @@ def create_agent_setup(initial_states: List[jnp.ndarray], target_positions: List
     agents = []
     reference_trajectories = []
     
+    # Use the actual number of agents passed in, not the global n_agents
+    n_agents_in_game = len(initial_states)
+    
     # Cost function weights (same for all agents) - exactly like original ilqgames_example
     Q = jnp.diag(jnp.array([0.1, 0.1, 0.001, 0.001]))  # State cost weights (position, position, velocity, velocity)
     R = jnp.diag(jnp.array([0.01, 0.01]))               # Control cost weights (ax, ay)
     
-    for i in range(n_agents):
+    for i in range(n_agents_in_game):
         # Create agent
         agent = PointAgent(dt=dt, x_dim=4, u_dim=2, Q=Q, R=R)
         agents.append(agent)
         
-        # Reference trajectory (simple linear interpolation like original example)
+        # Reference trajectory (EXACTLY like reference generation)
         # Create a straight-line reference trajectory from initial position to target
         start_pos = jnp.array(initial_states[i][:2])  # Extract x, y position and convert to array
-        target_pos = jnp.array(target_positions[i])   # target_positions[i] is already [x, y]
+        target_pos = jnp.array(target_positions[i])   # Convert to array
         
-        # Create straight-line reference trajectory from initial position to target
-        
-        # Linear interpolation over time steps (exactly like original ilqgames_example)
+        # Linear interpolation over time steps (exactly like reference generation)
         ref_traj = jnp.linspace(start_pos, target_pos, T_receding_horizon_planning)
         reference_trajectories.append(ref_traj)
     
@@ -147,159 +148,120 @@ def create_agent_setup(initial_states: List[jnp.ndarray], target_positions: List
 
 def create_loss_functions(agents: list, reference_trajectories: list) -> tuple:
     """
-    Create loss functions for each agent based on their reference trajectories.
+    Create loss functions and their linearizations for all agents.
     
     Args:
         agents: List of agent objects
-        reference_trajectories: Reference trajectories for each agent
+        reference_trajectories: List of reference trajectories for each agent
     
     Returns:
-        Tuple of (loss_functions, linearize_functions, compiled_functions)
+        Tuple of (loss_functions, linearize_loss_functions, compiled_functions)
     """
     loss_functions = []
-    linearize_functions = []
+    linearize_loss_functions = []
     compiled_functions = []
     
+    n_agents_in_game = len(agents)  # Use actual number of agents in this game
+    
     for i, agent in enumerate(agents):
-        ref_traj = reference_trajectories[i]
-        
-        def create_runtime_loss(agent_idx, ref_traj):
+        # Create loss function for this agent
+        def create_runtime_loss(agent_idx, agent_obj, ref_traj):
             def runtime_loss(xt, ut, ref_xt, other_states):
-                # Navigation cost: follow reference trajectory
+                # Navigation cost - track reference trajectory (exactly like reference generation)
                 nav_loss = jnp.sum(jnp.square(xt[:2] - ref_xt[:2]))
                 
-                # Collision avoidance cost
+                collision_weight = config.optimization.collision_weight
+                collision_scale = config.optimization.collision_scale
+                ctrl_weight = config.optimization.control_weight
+                
+                # Collision avoidance costs - exponential penalty for proximity to other agents
+                # (exactly like reference generation)
                 collision_loss = 0.0
-                for other_state in other_states:
-                    if other_state is not None:
-                        distance_squared = jnp.sum(jnp.square(xt[:2] - other_state[:2]))
-                        collision_loss += 10.0 * jnp.exp(-5.0 * distance_squared)
+                for other_xt in other_states:
+                    collision_loss += collision_weight * jnp.exp(-collision_scale * jnp.sum(jnp.square(xt[:2] - other_xt[:2])))
                 
-                # Control cost
-                control_loss = jnp.sum(jnp.square(ut))
+                # Control cost - simplified without velocity scaling
+                ctrl_loss = ctrl_weight * jnp.sum(jnp.square(ut))
                 
-                return nav_loss + collision_loss + 0.1 * control_loss
+                # Return complete loss including all terms
+                return nav_loss + collision_loss + ctrl_loss
             
             return runtime_loss
         
-        def trajectory_loss(x_traj, u_traj, ref_x_traj, other_x_trajs):
-            """Compute total trajectory loss"""
-            total_loss = 0.0
-            for t in range(len(x_traj)):
-                # Get reference point for this timestep
-                ref_xt = ref_x_traj[t] if t < len(ref_x_traj) else ref_x_traj[-1]
-                
-                # Get other agents' states at this timestep
-                other_states = []
-                for other_x_traj in other_x_trajs:
-                    if other_x_traj is not None and t < len(other_x_traj):
-                        other_states.append(other_x_traj[t])
-                
-                # Compute single step loss
-                step_loss = create_runtime_loss(i, ref_traj)(x_traj[t], u_traj[t], ref_xt, other_states)
-                total_loss += step_loss
-            
-            return total_loss
+        runtime_loss = create_runtime_loss(i, agent, reference_trajectories[i])
         
-        def linearize_loss(x_traj, u_traj, ref_x_traj, other_x_trajs):
-            """Compute gradients of trajectory loss w.r.t. states and controls"""
-            # Define single step loss
-            def single_step_loss(xt, ut, ref_xt, other_states):
-                return create_runtime_loss(i, ref_traj)(xt, ut, ref_xt, other_states)
+        # Create trajectory loss function
+        def trajectory_loss(x_traj, u_traj, ref_x_traj, other_x_trajs):
+            def single_step_loss(args):
+                xt, ut, ref_xt, other_xts = args
+                return runtime_loss(xt, ut, ref_xt, other_xts)
             
-            # Compute gradients for each timestep
-            dldx = grad(single_step_loss, argnums=0)
-            dldu = grad(single_step_loss, argnums=1)
+            loss_array = vmap(single_step_loss)((x_traj, u_traj, ref_x_traj, other_x_trajs))
+            return loss_array.sum() * agent.dt
+        
+        # Create linearization function
+        def linearize_loss(x_traj, u_traj, ref_x_traj, other_x_trajs):
+            dldx = grad(runtime_loss, argnums=(0))
+            dldu = grad(runtime_loss, argnums=(1))
             
             def grad_step(args):
                 xt, ut, ref_xt, other_xts = args
                 return dldx(xt, ut, ref_xt, other_xts), dldu(xt, ut, ref_xt, other_xts)
             
-            # Prepare arguments for vmap
-            ref_x_expanded = []
-            other_x_expanded = []
-            
-            for t in range(len(x_traj)):
-                # Get reference point for this timestep
-                ref_xt = ref_x_traj[t] if t < len(ref_x_traj) else ref_x_traj[-1]
-                ref_x_expanded.append(ref_xt)
-                
-                # Get other agents' states at this timestep
-                other_states = []
-                for other_x_traj in other_x_trajs:
-                    if other_x_traj is not None and t < len(other_x_traj):
-                        other_states.append(other_x_traj[t])
-                    else:
-                        other_states.append(jnp.zeros(4))  # Placeholder state
-                other_x_expanded.append(jnp.array(other_states))
-            
-            ref_x_expanded = jnp.array(ref_x_expanded)
-            other_x_expanded = jnp.array(other_x_expanded)
-            
-            grads = vmap(grad_step)((x_traj, u_traj, ref_x_expanded, other_x_expanded))
+            grads = vmap(grad_step)((x_traj, u_traj, ref_x_traj, other_x_trajs))
             return grads[0], grads[1]  # a_traj, b_traj
         
-        loss_functions.append(trajectory_loss)
-        linearize_functions.append(linearize_loss)
+        # Compile functions with GPU optimizations
+        compiled_loss = jit(trajectory_loss, device=device)
+        compiled_linearize = jit(linearize_loss, device=device)
+        compiled_linearize_dyn = jit(agent.linearize_dyn, device=device)
+        compiled_solve = jit(agent.solve, device=device)
         
-        # Compile the functions for efficiency
+        loss_functions.append(trajectory_loss)
+        linearize_loss_functions.append(linearize_loss)
         compiled_functions.append({
-            'loss': jit(trajectory_loss),
-            'linearize': jit(linearize_loss)
+            'loss': compiled_loss,
+            'linearize_loss': compiled_linearize,
+            'linearize_dyn': compiled_linearize_dyn,
+            'solve': compiled_solve
         })
     
-    return loss_functions, linearize_functions, compiled_functions
+    return loss_functions, linearize_loss_functions, compiled_functions
 
 
-def solve_receding_horizon_game(agents: list, 
-                               current_states: list, 
-                               target_positions: List[jnp.ndarray], 
-                               compiled_functions: list) -> tuple:
+def solve_ilqgames_iterative(agents: list, 
+                            initial_states: list,
+                            reference_trajectories: list,
+                            compiled_functions: list) -> tuple:
     """
-    Solve a single receding horizon game using the proper iLQR approach.
+    Solve the iLQGames problem using the original iterative approach.
     
     Args:
         agents: List of agent objects
-        current_states: Current states of all agents
-        target_positions: Target positions for all agents
-        compiled_functions: Compiled loss functions for each agent
+        initial_states: List of initial states for each agent
+        reference_trajectories: List of reference trajectories for each agent
+        compiled_functions: List of compiled functions for each agent
     
     Returns:
-        Tuple of (first_controls, full_trajectories, game_time)
+        Tuple of (final_state_trajectories, final_control_trajectories, total_time)
     """
     start_time = time.time()
     
-    # Create agent setup with current states
-    initial_states = []
-    for i in range(n_agents):
-        if i < len(current_states):
-            initial_states.append(jnp.array(current_states[i]))
-        else:
-            # Fallback to zero state if not available
-            initial_states.append(jnp.array([0.0, 0.0, 0.0, 0.0]))
+    # Initialize control trajectories with zeros
+    control_trajectories = [jnp.zeros((T_receding_horizon_planning, 2)) for _ in range(len(agents))]
     
-    # Create reference trajectories for current planning horizon
-    current_reference_trajectories = []
-    for i in range(n_agents):
-        start_pos = jnp.array(initial_states[i][:2])  # Convert to array
-        target_pos = jnp.array(target_positions[i])   # target_positions[i] is already [x, y]
-        # Linear interpolation over planning horizon
-        ref_traj = jnp.linspace(start_pos, target_pos, T_receding_horizon_planning)
-        current_reference_trajectories.append(ref_traj)
+    # Track losses for debugging
+    total_losses = []
     
-    # Initialize control trajectories with zeros (like the training script)
-    control_trajectories = [jnp.zeros((T_receding_horizon_planning, 2)) for _ in range(n_agents)]
-    
-    # Main optimization loop (following the pattern from generate_receding_horizon_trajectories.py)
-    for iter in range(num_iters):
-        # Step 1: Linearize dynamics for all agents using agent.linearize_dyn
+    for iter in range(num_iters + 1):
+        # Step 1: Linearize dynamics for all agents
         state_trajectories = []
         A_trajectories = []
         B_trajectories = []
         
-        for i in range(n_agents):
-            # Use the agent's linearize_dyn method (like in the reference files)
-            x_traj, A_traj, B_traj = agents[i].linearize_dyn(initial_states[i], control_trajectories[i])
+        for i in range(len(agents)):
+            x_traj, A_traj, B_traj = compiled_functions[i]['linearize_dyn'](
+                initial_states[i], control_trajectories[i])
             state_trajectories.append(x_traj)
             A_trajectories.append(A_traj)
             B_trajectories.append(B_traj)
@@ -308,44 +270,85 @@ def solve_receding_horizon_game(agents: list,
         a_trajectories = []
         b_trajectories = []
         
-        for i in range(n_agents):
+        for i in range(len(agents)):
             # Create list of other agents' states for this agent
-            other_states = [state_trajectories[j] for j in range(n_agents) if j != i]
+            other_states = [state_trajectories[j] for j in range(len(agents)) if j != i]
             
-            # Use the compiled linearize function from the loss functions
-            a_traj, b_traj = compiled_functions[i]['linearize'](
-                state_trajectories[i], control_trajectories[i], 
-                current_reference_trajectories[i], other_states)
+            a_traj, b_traj = compiled_functions[i]['linearize_loss'](
+                state_trajectories[i], control_trajectories[i], reference_trajectories[i], other_states)
             a_trajectories.append(a_traj)
             b_trajectories.append(b_traj)
         
-        # Step 3: Solve LQR subproblems for all agents using agent.solve
+        # Step 3: Solve LQR subproblems for all agents
         control_updates = []
         
-        for i in range(n_agents):
-            # Use the agent's built-in solve method (like in the training script)
-            v_traj, _ = agents[i].solve(
+        for i in range(len(agents)):
+            v_traj, _ = compiled_functions[i]['solve'](
                 A_trajectories[i], B_trajectories[i], 
                 a_trajectories[i], b_trajectories[i])
             control_updates.append(v_traj)
         
-        # Step 4: Update control trajectories with gradient descent
-        for i in range(n_agents):
-            control_trajectories[i] += step_size * control_updates[i]
-    
-    # Extract first controls (what will actually be applied)
-    first_controls = [control_trajectories[i][0] for i in range(n_agents)]
-    
-    # Get final state trajectories for return
-    final_state_trajectories = []
-    for i in range(n_agents):
-        x_traj, _, _ = agents[i].linearize_dyn(initial_states[i], control_trajectories[i])
-        final_state_trajectories.append(x_traj)
+        # Update control trajectories with gradient descent
+        for i in range(len(agents)):
+            control_trajectories[i] = control_trajectories[i] + step_size * control_updates[i]
     
     end_time = time.time()
-    game_time = end_time - start_time
+    total_time = end_time - start_time
     
-    return first_controls, final_state_trajectories, game_time
+    return state_trajectories, control_trajectories, total_time
+
+
+def solve_ilqgames(agents: list, 
+                   initial_states: list,
+                   reference_trajectories: list,
+                   compiled_functions: list) -> tuple:
+    """
+    Solve the iLQGames problem for multiple agents using original iterative approach.
+    """
+    return solve_ilqgames_iterative(agents, initial_states, reference_trajectories, compiled_functions)
+
+
+def solve_receding_horizon_game(agents: list, 
+                               current_states: list, 
+                               target_positions: List[jnp.ndarray], 
+                               compiled_functions: list) -> tuple:
+    """
+    Solve a single receding horizon game (50-horizon) and return the first control.
+    
+    Args:
+        agents: List of agent objects
+        current_states: Current states for each agent
+        target_positions: Target positions for each agent
+        compiled_functions: Compiled functions for each agent
+    
+    Returns:
+        Tuple of (first_controls, full_trajectories, total_time)
+    """
+    start_time = time.time()
+    
+    # Create reference trajectories from current positions to targets
+    current_reference_trajectories = []
+    for i in range(len(agents)):
+        start_pos = jnp.array(current_states[i][:2])  # Extract x, y position and convert to array
+        target_pos = jnp.array(target_positions[i])   # Convert to array
+        # Linear interpolation over planning horizon
+        ref_traj = jnp.linspace(start_pos, target_pos, T_receding_horizon_planning)
+        current_reference_trajectories.append(ref_traj)
+    
+    # Solve the 50-horizon game
+    state_trajectories, control_trajectories, total_time = solve_ilqgames(
+        agents, current_states, current_reference_trajectories, compiled_functions)
+    
+    # Extract the first control from each control trajectory
+    first_controls = []
+    for i in range(len(agents)):
+        if len(control_trajectories[i]) > 0:
+            first_control = control_trajectories[i][0]  # First control from the computed trajectory
+            first_controls.append(first_control)
+        else:
+            first_controls.append(jnp.zeros(2))  # Fallback to zero control
+    
+    return first_controls, state_trajectories, total_time
 
 
 def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
@@ -392,7 +395,8 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                                      psn_model: PlayerSelectionNetwork,
                                      psn_trained_state: Any,
                                      goal_model: GoalInferenceNetwork,
-                                     goal_trained_state: Any) -> Dict[str, Any]:
+                                     goal_trained_state: Any,
+                                     psn_model_path: str = None) -> Dict[str, Any]:
     """
     Test receding horizon planning with goal inference and player selection models.
     
@@ -461,11 +465,11 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         agent_key = f"agent_{agent_idx}"
         agent_states = current_game_state["trajectories"][agent_key]["states"]
         if len(agent_states) > 0:
-            current_states.append(agent_states[-1])
+            current_states.append(jnp.array(agent_states[-1]))
         else:
             # Fallback
             sample_states = sample_data["trajectories"][agent_key]["states"]
-            current_states.append(sample_states[T_observation - 1] if len(sample_states) >= T_observation else sample_states[-1])
+            current_states.append(jnp.array(sample_states[T_observation - 1] if len(sample_states) >= T_observation else sample_states[-1]))
     
     # Main receding horizon loop
     for iteration in range(T_receding_horizon_iterations):        
@@ -479,11 +483,22 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             true_goals = predicted_goals  # Same as predicted for this phase
         else:
             # After N iterations: Use goal inference and player selection models (threshold: {config.testing.receding_horizon.mask_threshold})
-            # Step 1: Infer goals using the observation trajectory
-            goal_obs_traj = extract_observation_trajectory(sample_data)
-            goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
-            predicted_goals = goal_model.apply({'params': goal_trained_state['params']}, goal_obs_input, deterministic=True)
-            predicted_goals = predicted_goals[0].reshape(n_agents, 2)
+            
+            # PSN was trained with true goals, so we should use true goals for testing to match training
+            goal_source = "true_goals"
+            # print(f"        PSN was trained with true goals, using true goals for testing (matching training)")
+            
+            if goal_source == "true_goals":
+                # Use true goals (same as PSN training)
+                predicted_goals = extract_reference_goals(sample_data)
+                # print(f"        Using true goals for testing (matching PSN training)")
+            else:
+                # Use goal inference model (same as PSN training)
+                goal_obs_traj = extract_observation_trajectory(sample_data)
+                goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
+                predicted_goals = goal_model.apply({'params': goal_trained_state['params']}, goal_obs_input, deterministic=True)
+                predicted_goals = predicted_goals[0].reshape(n_agents, 2)
+                # print(f"        Using goal inference model for testing (matching PSN training)")
             
             # Get true goals for comparison
             true_goals = extract_reference_goals(sample_data)
@@ -512,7 +527,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             obs_array = jnp.array(obs_traj)  # (T_observation, n_agents, state_dim)
             obs_input = obs_array.reshape(1, T_observation, n_agents, 4)  # (1, 10, 4, 4)
             
-            predicted_mask = psn_model.apply({'params': psn_trained_state['params']}, obs_input)
+            predicted_mask = psn_model.apply({'params': psn_trained_state['params']}, obs_input, deterministic=True)
             predicted_mask = predicted_mask[0]  # Remove batch dimension
             
             # Apply threshold to get selected agents
@@ -527,16 +542,53 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 mask_sparsity = 1.0 - (num_selected / (n_agents - 1))
         
         # Step 3: Solve receding horizon game with predicted goals
-        # Create agent setup for the current iteration
-        agents, reference_trajectories = create_agent_setup(current_states, predicted_goals)
-        
-        # Create loss functions
-        loss_functions, linearize_functions, compiled_functions = create_loss_functions(
-            agents, reference_trajectories)
-        
-        # Solve the game
-        first_controls, full_trajectories, game_time = solve_receding_horizon_game(
-            agents, current_states, predicted_goals, compiled_functions)
+        # Apply masking: only include agents above threshold (EXACTLY like training script)
+        if iteration >= config.testing.receding_horizon.initial_stabilization_iterations and 'predicted_mask' in locals() and predicted_mask is not None:
+            # Filter agents and goals based on mask threshold (only after initial stabilization)
+            mask_threshold = config.testing.receding_horizon.mask_threshold
+            selected_agents = jnp.where(predicted_mask > mask_threshold)[0]
+            
+            # Ensure ego agent (agent 0) is always included
+            if 0 not in selected_agents:
+                selected_agents = jnp.concatenate([jnp.array([0]), selected_agents])
+                selected_agents = jnp.unique(selected_agents)  # Remove duplicates
+            
+            # Filter current states and predicted goals to only include selected agents
+            filtered_current_states = [current_states[i] for i in selected_agents]
+            filtered_predicted_goals = predicted_goals[selected_agents]
+            
+            # Create agent setup for the filtered agents
+            agents, reference_trajectories = create_agent_setup(filtered_current_states, filtered_predicted_goals)
+            
+            # Create loss functions
+            loss_functions, linearize_loss_functions, compiled_functions = create_loss_functions(
+                agents, reference_trajectories)
+            
+            # Solve the game with filtered agents
+            first_controls, full_trajectories, game_time = solve_receding_horizon_game(
+                agents, filtered_current_states, filtered_predicted_goals, compiled_functions)
+            
+            # Map results back to full agent list for compatibility with rest of code
+            full_first_controls = [jnp.zeros(2) for _ in range(n_agents)]  # Default zero controls
+            full_trajectories_expanded = [jnp.zeros((T_receding_horizon_planning, 4)) for _ in range(n_agents)]
+            
+            for i, agent_idx in enumerate(selected_agents):
+                full_first_controls[agent_idx] = first_controls[i]
+                full_trajectories_expanded[agent_idx] = full_trajectories[i]
+            
+            first_controls = full_first_controls
+            full_trajectories = full_trajectories_expanded
+        else:
+            # No masking: use all agents (for initial stabilization or fallback)
+            agents, reference_trajectories = create_agent_setup(current_states, predicted_goals)
+            
+            # Create loss functions
+            loss_functions, linearize_loss_functions, compiled_functions = create_loss_functions(
+                agents, reference_trajectories)
+            
+            # Solve the game
+            first_controls, full_trajectories, game_time = solve_receding_horizon_game(
+                agents, current_states, predicted_goals, compiled_functions)
         
         # Step 4: Store results for this iteration
         iteration_result = {
@@ -706,6 +758,9 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
         ax.grid(True, alpha=0.3)
         
         # Plot trajectories up to current step for all agents
+        # Visualization logic:
+        # - Ego agent: Shows both computed trajectory (from solver) AND ground truth trajectory
+        # - Other agents: Only show ground truth trajectories (not from solver)
         for i in range(n_agents):
             agent_key = f"agent_{i}"
             agent_states = game_state["trajectories"][agent_key]["states"]
@@ -738,16 +793,17 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
                                    max(ax.get_xlim()[1], all_x.max() + 0.1))
                         ax.set_ylim(min(ax.get_ylim()[0], all_y.min() - 0.1),
                                    max(ax.get_ylim()[1], all_y.max() + 0.1))
-                else:  # Other agents - show reference receding horizon trajectories
-                    # Plot reference trajectory from sample data (this is the receding horizon reference)
+                else:  # Other agents - show ground truth trajectories (not from solver)
+                    # Plot ground truth trajectory from sample data
                     sample_agent_states = sample_data["trajectories"][agent_key]["states"]
                     if len(sample_agent_states) > 0:
                         sample_traj = np.array(sample_agent_states[:T_total])
                         ax.plot(sample_traj[:, 0], sample_traj[:, 1], '-', 
                                  color=other_agent_color, alpha=0.6, linewidth=1, 
-                                 label=f'Agent {i} (Reference Receding Horizon)')
+                                 label=f'Agent {i} (Ground Truth)')
         
         # Plot current positions with selection coloring
+        # Note: Position markers show PSN selection status, but trajectories are as described above
         for i in range(n_agents):
             agent_key = f"agent_{i}"
             agent_states = game_state["trajectories"][agent_key]["states"]
@@ -759,7 +815,8 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
             if actual_step >= 0:
                 current_pos = np.array(agent_states[actual_step][:2])
                 
-                # Determine if this agent is selected (for non-ego agents)
+                # Determine if this agent is selected by PSN (for non-ego agents)
+                # This is just for visualization coloring - all agents use ground truth trajectories
                 is_selected = False
                 if i > 0 and step >= T_observation:  # Only check selection after observation phase
                     # Find the iteration result for this step
@@ -767,9 +824,10 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
                     if iteration_idx < len(results['receding_horizon_results']):
                         iteration_result = results['receding_horizon_results'][iteration_idx]
                         predicted_mask = iteration_result['predicted_mask']
-                        if i-1 < len(predicted_mask) and predicted_mask[i-1] > 0.05:  # i-1 because mask excludes ego agent
-                            is_selected = True
-                
+                        mask_threshold = config.testing.receding_horizon.mask_threshold
+                        mask_value = predicted_mask[i-1] if i-1 < len(predicted_mask) else 'N/A'
+                        is_selected = mask_value > mask_threshold
+                        
                 if i == 0:  # Ego agent
                     ax.plot(current_pos[0], current_pos[1], 'o', 
                              color=ego_color, markersize=10, alpha=0.8)
@@ -781,6 +839,7 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
                         ax.text(current_pos[0] + 0.1, current_pos[1] + 0.1, f'{i}*', 
                                 fontsize=12, ha='left', va='bottom', 
                                 bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
+                        print(f"        Step {step}, Agent {i}: Plotting RED (selected)")
                     else:
                         ax.plot(current_pos[0], current_pos[1], 'o', 
                                  color=other_agent_color, markersize=8, alpha=0.7)
@@ -788,7 +847,6 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
                         ax.text(current_pos[0] + 0.1, current_pos[1] + 0.1, f'{i}', 
                                 fontsize=12, ha='left', va='bottom', 
                                 bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-        
         # Plot goals and goal predictions
         true_goals = extract_reference_goals(sample_data)
         
@@ -826,8 +884,11 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
         # Convert plot to image
         canvas = plt.get_current_fig_manager().canvas
         canvas.draw()
-        image = np.frombuffer(canvas.tostring_rgb(), dtype='uint8')
-        image = image.reshape(canvas.get_width_height()[::-1] + (3,))
+        # Use modern buffer_rgba() instead of deprecated tostring_rgb()
+        image = np.frombuffer(canvas.buffer_rgba(), dtype='uint8')
+        image = image.reshape(canvas.get_width_height()[::-1] + (4,))  # RGBA has 4 channels
+        # Convert RGBA to RGB by dropping alpha channel
+        image = image[:, :, :3]
         frames.append(image)
         
         plt.close()
@@ -921,7 +982,7 @@ def run_receding_horizon_testing(psn_model_path: str,
         try:
             # Run receding horizon testing with models
             results = test_receding_horizon_with_models(
-                sample_data, psn_model, psn_trained_state, goal_model, goal_trained_state)
+                sample_data, psn_model, psn_trained_state, goal_model, goal_trained_state, psn_model_path)
             
             # Save results
             filepath = save_test_results(results, output_dir)
@@ -968,30 +1029,12 @@ if __name__ == "__main__":
     print("RECEDING HORIZON TESTING WITH GOAL INFERENCE AND PLAYER SELECTION MODELS")
     print("=" * 80)
     
-    # Model paths from config - use templates to generate paths
-    psn_model_path = config.testing.psn_model_template.format(
-            N_agents=config.game.N_agents,
-            T_total=config.game.T_total,
-            T_observation=config.goal_inference.observation_length,
-            goal_inference_lr=config.goal_inference.learning_rate,
-            batch_size=config.goal_inference.batch_size,
-            goal_loss_weight=config.goal_inference.goal_loss_weight,
-            num_epochs=config.goal_inference.num_epochs,
-            psn_lr=config.psn.learning_rate,
-            sigma1=config.psn.sigma1,
-            sigma2=config.psn.sigma2,
-            psn_epochs=config.psn.num_epochs
-        )
+    # Model paths - PSN from goal_true directory, Goal inference from goal_inference_gru directory
+    # PSN was trained with true goals, so load from goal_true_xxx directory
+    psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/psn_gru_true_goals_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
     
-    goal_model_path = config.testing.goal_inference_model_template.format(
-            N_agents=config.game.N_agents,
-            T_total=config.game.T_total,
-            T_observation=config.goal_inference.observation_length,
-            learning_rate=config.goal_inference.learning_rate,
-            batch_size=config.goal_inference.batch_size,
-            goal_loss_weight=config.goal_inference.goal_loss_weight,
-            num_epochs=config.goal_inference.num_epochs
-        )
+    # Goal inference model from goal_inference_gru_xxx directory
+    goal_model_path = f"log/goal_inference_gru_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_best_model.pkl"
     
     # Check if models exist
     if psn_model_path is None or not os.path.exists(psn_model_path):
@@ -1004,7 +1047,7 @@ if __name__ == "__main__":
         print("Please train a goal inference model first using: python3 goal_inference/pretrain_goal_inference.py")
         exit(1)
     
-    reference_file = "reference_trajectories_4p"
+    reference_file = config.paths.reference_data_dir
     
     # Create output directory under the PSN model directory
     psn_model_dir = os.path.dirname(psn_model_path)

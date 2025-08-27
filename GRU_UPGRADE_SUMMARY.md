@@ -141,11 +141,17 @@ Both updated with GRU architectures and proper dropout handling.
 - Retrain both networks with new architecture
 - Update model paths in configuration
 
-### 2. **Inference**
+### 2. **Directory Naming**
+- **New naming convention**: All directories now include `_gru` suffix
+- **Goal Inference**: `goal_inference_gru_*` directories
+- **PSN**: `psn_gru_*` directories (both standalone and under goal inference)
+- **Clear identification**: Easy to distinguish GRU models from old MLP models
+
+### 3. **Inference**
 - Always use `deterministic=True` for evaluation
 - Dropout automatically disabled during inference
 
-### 3. **Compatibility**
+### 4. **Compatibility**
 - All training scripts updated for new architecture
 - Configuration files updated with new parameters
 - Example files demonstrate proper usage
@@ -158,13 +164,37 @@ Both updated with GRU architectures and proper dropout handling.
 4. **Monitor Training**: Use TensorBoard for loss tracking
 5. **Test on New Data**: Validate generalization improvement
 
+## 📁 **Updated Directory Naming Convention**
+
+### **New GRU Directory Structure:**
+```
+log/
+├── goal_inference_gru_N_4_T_50_obs_10_lr_0.001_bs_32_goal_loss_weight_1.0_epochs_1000/
+│   ├── goal_inference_best_model.pkl
+│   └── psn_gru_pretrained_goals_N_4_T_50_obs_10_lr_0.002_bs_32_sigma1_0.1_sigma2_0.2_epochs_200/
+│       └── psn_best_model.pkl
+└── psn_gru_N_4_T_50_obs_10_ref_50_lr_0.002_bs_32_sigma1_0.1_sigma2_0.2_sigma3_0.1_epochs_200/
+    └── psn_best_model.pkl
+```
+
+### **Key Changes:**
+- **Goal Inference**: `goal_inference_*` → `goal_inference_gru_*`
+- **PSN (under goal inference)**: `psn_pretrained_goals_*` → `psn_gru_pretrained_goals_*`
+- **PSN (standalone)**: `psn_*` → `psn_gru_*`
+
+### **Benefits:**
+- **Clear identification** of GRU-based models
+- **Easy differentiation** from old MLP models
+- **Consistent naming** across all training scripts
+- **Future compatibility** when adding other architectures
+
 ## Technical Details
 
 ### GRU Implementation
 - **Shared Weights**: Same GRU cell for all agents
-- **Sequence Length**: Processes all 10 observation steps
+- **Sequence Length**: Processes all 10 observation steps using manual iteration
 - **Hidden Size**: 64 units (balanced capacity vs efficiency)
-- **Initialization**: Proper carry state initialization
+- **Compatible API**: Uses `nn.GRUCell` with manual sequence processing for JAX/Flax compatibility
 
 ### Dropout Integration
 - **Training Mode**: `deterministic=False` enables dropout

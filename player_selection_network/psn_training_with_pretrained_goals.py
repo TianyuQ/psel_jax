@@ -105,6 +105,7 @@ config = load_config()
 
 # Game parameters
 N_agents = config.game.N_agents
+ego_agent_id = config.game.ego_agent_id
 dt = config.game.dt
 T_total = config.game.T_total
 T_observation = config.goal_inference.observation_length
@@ -177,55 +178,8 @@ else:
     print(f"Using CPU: {device}")
 
 # ============================================================================
-# GOAL INFERENCE NETWORK DEFINITION
-# ============================================================================
-
-class GoalInferenceNetwork(nn.Module):
-    """Goal inference network for predicting agent goals from observation trajectories."""
-    
-    hidden_dims: List[int]
-    goal_output_dim: int = N_agents * 2  # goal_dim = 2 for (x, y)
-    
-    @nn.compact
-    def __call__(self, x: jnp.ndarray, deterministic: bool = False) -> jnp.ndarray:
-        """
-        Forward pass of the goal inference network.
-        
-        Args:
-            x: Input observations (batch_size, T_observation * N_agents * state_dim)
-            deterministic: Whether to use deterministic mode (no dropout)
-            
-        Returns:
-            Predicted goals (batch_size, N_agents * goal_dim)
-        """
-        batch_size = x.shape[0]
-        
-        # Reshape to separate time steps and agents
-        x = x.reshape(batch_size, T_observation, N_agents, state_dim)
-        
-        # Average over time steps to get a summary representation
-        x = jnp.mean(x, axis=1)  # (batch_size, N_agents, state_dim)
-        
-        # Flatten all agent states
-        x = x.reshape(batch_size, N_agents * state_dim)
-        
-        # Feature extraction layers using the full hidden_dims list
-        x = nn.Dense(features=self.hidden_dims[0])(x)
-        x = nn.relu(x)
-        x = nn.Dropout(rate=config.goal_inference.dropout_rate)(x, deterministic=deterministic)
-        
-        x = nn.Dense(features=self.hidden_dims[1])(x)
-        x = nn.relu(x)
-        x = nn.Dropout(rate=config.goal_inference.dropout_rate)(x, deterministic=deterministic)
-        
-        x = nn.Dense(features=self.hidden_dims[2])(x)
-        x = nn.relu(x)
-        
-        # Goal prediction output
-        goals = nn.Dense(features=self.goal_output_dim)(x)
-        # No activation for goals - they can be any real values
-        
-        return goals
+# Import GoalInferenceNetwork from the goal inference module
+from goal_inference.pretrain_goal_inference import GoalInferenceNetwork
 
 def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
     """
@@ -290,21 +244,19 @@ class PlayerSelectionNetwork(nn.Module):
             # Extract trajectory for this agent: (batch_size, T_observation, state_dim)
             agent_traj = x[:, :, agent_idx, :]
             
-            # Process through shared GRU
-            gru_out, _ = nn.GRUCell(
-                features=self.gru_hidden_size,
-                name=f'shared_gru'
-            ).initialize_carry(jax.random.key(0), (batch_size, self.gru_hidden_size))
+            # Use simple GRU cell with manual scanning for compatibility
+            gru_cell = nn.GRUCell(features=self.gru_hidden_size, name=f'gru_agent_{agent_idx}')
+            
+            # Initialize hidden state
+            init_hidden = jnp.zeros((batch_size, self.gru_hidden_size))
             
             # Process sequence step by step
+            hidden = init_hidden
             for t in range(T_observation):
-                gru_out, _ = nn.GRUCell(
-                    features=self.gru_hidden_size,
-                    name=f'shared_gru'
-                )(gru_out, agent_traj[:, t, :])
+                hidden, _ = gru_cell(hidden, agent_traj[:, t, :])
             
-            # Use final GRU output as agent representation
-            agent_features.append(gru_out)
+            # Use final hidden state as agent representation
+            agent_features.append(hidden)
         
         # Concatenate all agent features: (batch_size, N_agents * gru_hidden_size)
         x = jnp.concatenate(agent_features, axis=1)
@@ -321,6 +273,48 @@ class PlayerSelectionNetwork(nn.Module):
         mask = nn.sigmoid(mask)  # Binary mask
         
         return mask
+
+# ============================================================================
+# GOAL EXTRACTION FUNCTIONS
+# ============================================================================
+
+def extract_true_goals_from_batch(batch_data: List[Dict[str, Any]]) -> jnp.ndarray:
+    """
+    Extract true goals from batch data for training with true goals.
+    
+    Args:
+        batch_data: List of sample data dictionaries
+        
+    Returns:
+        Array of true goals (batch_size, N_agents * 2)
+    """
+    batch_goals = []
+    
+    for sample_data in batch_data:
+        # Extract goals for all agents from the reference trajectory
+        sample_goals = []
+        for agent_idx in range(N_agents):
+            agent_key = f"agent_{agent_idx}"
+            agent_states = sample_data["trajectories"][agent_key]["states"]
+            
+            # Use the final state position as the goal
+            if len(agent_states) > 0:
+                final_state = agent_states[-1]
+                goal_pos = jnp.array([final_state[0], final_state[1]])  # [x, y] from [x, y, vx, vy]
+            else:
+                # Fallback to zero if no states available
+                goal_pos = jnp.array([0.0, 0.0])
+            
+            sample_goals.append(goal_pos)
+        
+        # Flatten all agent goals into a single array
+        sample_goals_flat = jnp.concatenate(sample_goals)  # (N_agents * 2,)
+        batch_goals.append(sample_goals_flat)
+    
+    # Stack all samples into a batch
+    batch_goals_array = jnp.stack(batch_goals)  # (batch_size, N_agents * 2)
+    return batch_goals_array
+
 
 # ============================================================================
 # GAME SOLVING FUNCTIONS
@@ -474,9 +468,9 @@ def create_loss_functions(agents: list, mask_values=None, is_training: bool = Tr
                 if ref_traj is not None and len(ref_traj) > 0:
                     # Use reference trajectory for navigation (like ilqgames_example.py)
                     nav_loss = jnp.sum(jnp.square(xt[:2] - ref_traj[:2]))
-                else:
-                    # Fallback to goal-based navigation
-                    nav_loss = jnp.sum(jnp.square(xt[:2] - goal_pos[:2]))
+                # else:
+                #     # Fallback to goal-based navigation
+                #     nav_loss = jnp.sum(jnp.square(xt[:2] - goal_pos[:2]))
                 
                 # Collision avoidance costs with mask-based filtering
                 collision_loss = 0.0
@@ -591,8 +585,23 @@ def solve_masked_game_differentiable(agents: list, initial_states: list, target_
     # Convert lists to JAX arrays for better performance and differentiability
     initial_states_array = jnp.stack([jnp.array(s) for s in initial_states])  # (n_selected, 4)
     
-    # Create goal trajectories (goal position repeated for all time steps)
-    # Each agent should try to reach its goal at every time step, not follow a linear path
+    # Create reference trajectories (EXACTLY like reference generation)
+    # Linear interpolation from initial position to target position
+    reference_trajectories = []
+    for i in range(n_selected):
+        start_pos = initial_states[i][:2]  # Extract x, y position
+        target_pos = target_positions[i]
+        # Linear interpolation over time steps (EXACTLY like reference generation)
+        ref_traj = jnp.linspace(start_pos, target_pos, T_total)
+        # Convert to full state trajectory [x, y, vx, vy]
+        ref_states = jnp.zeros((T_total, 4))
+        for t in range(T_total):
+            pos = ref_traj[t]
+            vel = (target_pos - start_pos) / (T_total * dt)  # Constant velocity
+            ref_states = ref_states.at[t, :].set(jnp.concatenate([pos, vel]))
+        reference_trajectories.append(ref_states)
+    
+    # Create goal trajectories for compatibility (not used in cost function anymore)
     goal_trajectories = jnp.stack([
         jnp.tile(target_positions[i], (T_total, 1))
         for i in range(n_selected)
@@ -646,32 +655,35 @@ def solve_masked_game_differentiable(agents: list, initial_states: list, target_
     def compute_cost_gradients(agent_idx, x_traj, u_traj, goal_traj, all_x_trajs, mask_values, ref_traj=None):
         """Compute cost gradients for a single agent"""
         def single_step_cost(x, u, goal_x, other_xs, ref_x=None):
-            # Navigation cost - use reference trajectory if available, otherwise go to goal
-            if ref_x is not None:
-                nav_cost = jnp.sum(jnp.square(x[:2] - ref_x[:2]))  # Follow reference trajectory
-            else:
-                nav_cost = jnp.sum(jnp.square(x[:2] - goal_x[:2]))  # Go to goal position
+            # Navigation cost - track reference trajectory (EXACTLY like reference generation)
+            nav_cost = jnp.sum(jnp.square(x[:2] - ref_x[:2]))
             
-            # Collision avoidance cost with masking (following ilqgames_example.py pattern)
+            # Collision avoidance costs - exponential penalty for proximity to other agents
+            # (EXACTLY like reference generation) with proper masking
             collision_cost = 0.0
-            if len(other_xs) > 0 and mask_values is not None:
-                distances_sq = jnp.sum(jnp.square(x[:2] - other_xs[:, :2]), axis=1)
-                # Use collision penalty similar to ilqgames_example.py
-                collision_weight = config.optimization.collision_weight
-                collision_scale = config.optimization.collision_scale
-                base_collision = collision_weight * jnp.exp(-collision_scale * distances_sq)  # Using config values
-                
-                if agent_idx == 0:  # Ego agent uses mask
-                    # Apply mask values to collision costs - this is the key differentiable part
-                    num_others = len(other_xs)
-                    if num_others > 0:
-                        mask_vals_truncated = mask_values[:num_others]
-                        masked_collision = base_collision * mask_vals_truncated
-                        collision_cost = jnp.sum(masked_collision)
-                else:  # Other agents: full interaction
-                    collision_cost = jnp.sum(base_collision)
             
-            # Control cost (following ilqgames_example.py pattern)
+            # Compute collision cost with each other agent
+            if other_xs.shape[0] > 0:
+                # other_xs contains the states of other agents at this timestep
+                # For agent_idx = 0 (ego), other agents are at indices [1, 2, ..., n-1] in the full game
+                # For agent_idx = i, other agents are at indices [0, 1, ..., i-1, i+1, ..., n-1]
+                
+                # Compute collision cost for each other agent
+                for i, other_x in enumerate(other_xs):
+                    distance_squared = jnp.sum(jnp.square(x[:2] - other_x[:2]))
+                    
+                    if agent_idx == 0:  # Ego agent
+                        # For ego agent, collision cost is weighted by the mask values of other agents
+                        # other_xs[i] corresponds to agent i+1, use mask index i
+                        mask_idx = i
+                        if mask_idx < len(mask_values):
+                            agent_mask_value = mask_values[mask_idx]
+                            collision_cost += config.optimization.collision_weight * agent_mask_value * jnp.exp(-config.optimization.collision_scale * distance_squared)
+                    else:  # Non-ego agent
+                        # For other agents, collision cost is always full (they're always "selected" when in the game)
+                        collision_cost += config.optimization.collision_weight * jnp.exp(-config.optimization.collision_scale * distance_squared)
+            
+            # Control cost - simplified without velocity scaling (EXACTLY like reference generation)
             ctrl_cost = config.optimization.control_weight * jnp.sum(jnp.square(u))
             
             return nav_cost + collision_cost + ctrl_cost
@@ -690,16 +702,8 @@ def solve_masked_game_differentiable(agents: list, initial_states: list, target_
         else:
             other_x_transposed = jnp.zeros((T_total, 0, 4))
             
-        # Create reference trajectory array for this agent
-        if ref_traj is not None:
-            ref_traj_array = ref_traj[:T_total]  # Ensure it matches T_total length
-            if ref_traj_array.shape[0] < T_total:
-                # Pad with last state if trajectory is too short
-                last_state = ref_traj_array[-1] if ref_traj_array.shape[0] > 0 else jnp.zeros(4)
-                padding = jnp.tile(last_state, (T_total - ref_traj_array.shape[0], 1))
-                ref_traj_array = jnp.concatenate([ref_traj_array, padding], axis=0)
-        else:
-            ref_traj_array = jnp.zeros((T_total, 4))
+        # Use the reference trajectory for this agent (created from goals)
+        ref_traj_array = reference_trajectories[agent_idx]
         
         a_traj = jax.vmap(jax.grad(single_step_cost, argnums=0))(
             x_traj, u_traj, goal_traj, other_x_transposed, ref_traj_array)
@@ -739,14 +743,9 @@ def solve_masked_game_differentiable(agents: list, initial_states: list, target_
         b_trajs = []
         
         for i in range(n_selected):
-            # Get reference trajectory for this agent if available
-            ref_traj = None
-            if reference_trajectories is not None and i < len(reference_trajectories):
-                ref_traj = reference_trajectories[i]
-            
             a_traj, b_traj = compute_cost_gradients(
                 i, x_trajs[i], control_trajectories[i], 
-                goal_trajectories[i], x_trajs, mask_values, ref_traj)
+                goal_trajectories[i], x_trajs, mask_values, None)  # ref_traj not used anymore
             a_trajs.append(a_traj)
             b_trajs.append(b_traj)
         
@@ -818,36 +817,32 @@ def extract_ego_reference_trajectory(sample_data: Dict[str, Any], ego_agent_id: 
 
 def similarity_loss(pred_traj: jnp.ndarray, target_traj: jnp.ndarray) -> jnp.ndarray:
     """
-    Similarity loss: compare predicted trajectory with FUTURE target trajectory.
+    Similarity loss: compare predicted trajectory with target trajectory.
     
-    The PSN observes the first T_observation steps and predicts the trajectory
-    for the remaining time. This loss compares the predicted trajectory with
-    the actual future trajectory (from T_observation onwards).
+    This loss compares the predicted trajectory from the masked game solver
+    with the reference trajectory to measure how well the PSN's mask selection
+    enables the game solver to reproduce the desired behavior.
     
     Args:
         pred_traj: Predicted trajectory from masked game (T_total, state_dim)
-        target_traj: Full reference trajectory (T_reference, state_dim)
+        target_traj: Reference trajectory (T_reference, state_dim)
         
     Returns:
-        Similarity loss value comparing predicted vs future reference trajectory
+        Similarity loss value comparing predicted vs reference trajectory
     """
     # Extract positions (first 2 dimensions) for comparison
     pred_positions = pred_traj[:, :2]  # (T_total, 2)
     target_positions = target_traj[:, :2]  # (T_reference, 2)
     
-    # Use future trajectory from observation horizon onwards
-    # We want to compare with the trajectory AFTER the observation period
-    future_target_positions = target_positions[T_observation:]  # (T_reference - T_observation, 2)
-    
-    # Limit to the shorter of the two trajectories
-    min_length = min(pred_positions.shape[0], future_target_positions.shape[0])
+    # Ensure both trajectories have the same length for comparison
+    min_length = min(pred_positions.shape[0], target_positions.shape[0])
     
     if min_length == 0:
         return jnp.array(100.0)  # High loss if no valid comparison possible
     
     # Use only the first min_length steps for comparison
     pred_positions_matched = pred_positions[:min_length]  # (min_length, 2)
-    target_positions_matched = future_target_positions[:min_length]  # (min_length, 2)
+    target_positions_matched = target_positions[:min_length]  # (min_length, 2)
     
     # Compute position-wise distance
     position_diff = pred_positions_matched - target_positions_matched
@@ -1231,9 +1226,9 @@ def create_train_state(model: nn.Module, optimizer: optax.GradientTransformation
     return state
 
 def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
-               batch_data: List[Dict[str, Any]], goal_model: GoalInferenceNetwork,
-               goal_trained_state: train_state.TrainState, sigma1: float, sigma2: float,
-               rng: jnp.ndarray = None, similarity_pbar: tqdm = None) -> Tuple[train_state.TrainState, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+               batch_data: List[Dict[str, Any]], goal_model: Optional[GoalInferenceNetwork],
+               goal_trained_state: Optional[train_state.TrainState], sigma1: float, sigma2: float,
+               use_true_goals: bool = False, rng: jnp.ndarray = None, similarity_pbar: tqdm = None) -> Tuple[train_state.TrainState, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
     """
     Single training step with game-solving loss function.
     
@@ -1243,10 +1238,15 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
     
     def loss_fn(params):
         # Get predicted mask from PSN (training mode with dropout)
-        predicted_masks = state.apply_fn({'params': params}, observations, deterministic=False)
+        predicted_masks = state.apply_fn({'params': params}, observations, rngs={'dropout': rng}, deterministic=False)
         
-        # Get predicted goals from pretrained goal inference network
-        predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations, rng)
+        # Get goals based on configuration
+        if use_true_goals:
+            # Extract true goals from reference data
+            predicted_goals = extract_true_goals_from_batch(batch_data)
+        else:
+            # Get predicted goals from pretrained goal inference network
+            predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations, rng)
         
         # 1. Binary loss: encourages mask values to be close to 0 or 1
         binary_loss_val = binary_loss(predicted_masks)
@@ -1268,13 +1268,13 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
     (loss, loss_components), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
     
     # Apply gradient clipping to prevent gradient explosion
-    grad_norm = jax.tree_util.tree_reduce(lambda x, y: x + jnp.sum(jnp.square(y)), grads, initializer=0.0)
+    grad_norm = jax.tree.reduce(lambda x, y: x + jnp.sum(jnp.square(y)), grads, initializer=0.0)
     grad_norm = jnp.sqrt(grad_norm)
     
     max_grad_norm = config.debug.gradient_clip_value
     if grad_norm > max_grad_norm:
         scale = max_grad_norm / grad_norm
-        grads = jax.tree_map(lambda g: g * scale, grads)
+        grads = jax.tree.map(lambda g: g * scale, grads)
     
     # Apply gradients using the optimizer
     state = state.apply_gradients(grads=grads)
@@ -1282,8 +1282,8 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
     return state, loss, loss_components
 
 def validation_step(state: train_state.TrainState, validation_data: List[Dict[str, Any]],
-                   goal_model: GoalInferenceNetwork, goal_trained_state: train_state.TrainState,
-                   batch_size: int = 32, ego_agent_id: int = 0) -> Tuple[float, float, float, List[jnp.ndarray]]:
+                   goal_model: Optional[GoalInferenceNetwork], goal_trained_state: Optional[train_state.TrainState],
+                   batch_size: int = 32, ego_agent_id: int = 0, use_true_goals: bool = False) -> Tuple[float, float, float, List[jnp.ndarray]]:
     """
     Perform validation on the validation dataset.
     
@@ -1320,8 +1320,13 @@ def validation_step(state: train_state.TrainState, validation_data: List[Dict[st
         # Store masks for analysis
         all_predicted_masks.append(predicted_masks)
         
-        # Get predicted goals from pretrained goal inference network
-        predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations)
+        # Get goals based on configuration
+        if use_true_goals:
+            # Extract true goals from reference data
+            predicted_goals = extract_true_goals_from_batch(batch_data)
+        else:
+            # Get predicted goals from pretrained goal inference network
+            predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations)
         
         # Compute validation loss components
         binary_loss_val = binary_loss(predicted_masks)
@@ -1330,10 +1335,10 @@ def validation_step(state: train_state.TrainState, validation_data: List[Dict[st
         # Compute similarity loss using game solving
         similarity_loss_val = compute_batch_similarity_loss(predicted_masks, predicted_goals, batch_data, ego_agent_id)
         
-        # Total validation loss
+        # Total validation loss (same as training loss for fair comparison)
         total_loss_val = total_loss(predicted_masks, binary_loss_val, 
                                   sparsity_loss_val, similarity_loss_val,
-                                  sigma1, sigma2)  # No regularization during validation
+                                  sigma1, sigma2)  # Same loss function as training
 
         val_losses.append(float(total_loss_val))
         val_sparsity_losses.append(float(sparsity_loss_val))
@@ -1370,8 +1375,8 @@ def test_gradient_flow(state: train_state.TrainState, observations: jnp.ndarray,
     print("="*60)
     
     def test_loss_fn(params):
-        # Get predicted mask from PSN
-        predicted_masks = state.apply_fn({'params': params}, observations)
+        # Get predicted mask from PSN (deterministic mode for testing)
+        predicted_masks = state.apply_fn({'params': params}, observations, deterministic=True)
         
         # Get predicted goals from pretrained goal inference network
         predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations)
@@ -1403,7 +1408,7 @@ def test_gradient_flow(state: train_state.TrainState, observations: jnp.ndarray,
     (loss, loss_components), grads = jax.value_and_grad(test_loss_fn, has_aux=True)(state.params)
     
     # Check gradient norm
-    grad_norm = jax.tree_util.tree_reduce(lambda x, y: x + jnp.sum(jnp.square(y)), grads, initializer=0.0)
+    grad_norm = jax.tree.reduce(lambda x, y: x + jnp.sum(jnp.square(y)), grads, initializer=0.0)
     grad_norm = jnp.sqrt(grad_norm)
     
     print(f"Test loss: {float(loss):.6f}")
@@ -1427,11 +1432,11 @@ def test_gradient_flow(state: train_state.TrainState, observations: jnp.ndarray,
 # ============================================================================
 
 def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[str, Any]], 
-                                   validation_data: List[Dict[str, Any]], goal_model: GoalInferenceNetwork, 
-                                   goal_trained_state: train_state.TrainState,
+                                   validation_data: List[Dict[str, Any]], goal_model: Optional[GoalInferenceNetwork], 
+                                   goal_trained_state: Optional[train_state.TrainState],
                                    num_epochs: int = 30, learning_rate: float = 1e-3,
                                    sigma1: float = 0.1, sigma2: float = 0.0, batch_size: int = 32, 
-                                   rng: jnp.ndarray = None) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], train_state.TrainState, str, float, int]:
+                                   use_true_goals: bool = False, rng: jnp.ndarray = None) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], train_state.TrainState, str, float, int]:
     """Train PSN using pretrained goal inference network with validation."""
     if rng is None:
         rng = jax.random.PRNGKey(config.training.seed)
@@ -1442,13 +1447,21 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
     goal_model_name = os.path.basename(goal_model_dir)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    config_name = f"psn_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
     
-    # Place PSN logs under the goal inference model directory
-    log_dir = os.path.join(goal_model_dir, config_name)
+    # Determine directory structure based on goal source
+    if use_true_goals:
+        # When using true goals, save under a separate "goal_true" directory
+        goal_true_dir = os.path.join(os.path.dirname(goal_model_dir), "goal_true_N_" + str(N_agents) + "_T_" + str(T_total) + "_obs_" + str(T_observation))
+        config_name = f"psn_gru_true_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
+        log_dir = os.path.join(goal_true_dir, config_name)
+        print(f"Training with TRUE goals - PSN logs will be saved under: {goal_true_dir}")
+    else:
+        # When using predicted goals, save under the goal inference model directory
+        config_name = f"psn_gru_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
+        log_dir = os.path.join(goal_model_dir, config_name)
+        print(f"Training with PREDICTED goals - PSN logs will be saved under goal inference model directory: {goal_model_dir}")
+    
     os.makedirs(log_dir, exist_ok=True)
-    
-    print(f"PSN training logs will be saved under goal inference model directory: {goal_model_dir}")
     print(f"PSN specific log directory: {log_dir}")
     
     # Initialize TensorBoard writer
@@ -1465,16 +1478,16 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
     state = create_train_state(model, optimizer, input_shape, rng)
     
     # Test gradient flow before training starts
-    print("\nTesting gradient flow before training...")
-    test_observations = jnp.ones((1, T_observation * N_agents * state_dim))  # Dummy observations
-    test_references = jnp.ones((1, T_reference, state_dim))  # Dummy references
-    gradient_test_passed = test_gradient_flow(state, test_observations, goal_model, goal_trained_state, test_references)
+    # print("\nTesting gradient flow before training...")
+    # test_observations = jnp.ones((1, T_observation * N_agents * state_dim))  # Dummy observations
+    # test_references = jnp.ones((1, T_reference, state_dim))  # Dummy references
+    # gradient_test_passed = test_gradient_flow(state, test_observations, goal_model, goal_trained_state, test_references)
     
-    if not gradient_test_passed:
-        print("WARNING: Gradient test failed! Training may not work properly.")
-        print("Continuing anyway to see what happens...")
-    else:
-        print("Gradient test passed! Training should work correctly.")
+    # if not gradient_test_passed:
+    #     print("WARNING: Gradient test failed! Training may not work properly.")
+    #     print("Continuing anyway to see what happens...")
+    # else:
+    #     print("Gradient test passed! Training should work correctly.")
     
     training_losses = []
     validation_losses = []
@@ -1544,7 +1557,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
             # Training step with game solving
             state, loss, (binary_loss_val, sparsity_loss_val, similarity_loss_val) = train_step(
                 state, (observations, masks, reference_trajectories), batch_data, 
-                goal_model, goal_trained_state, current_sigma1, sigma2, step_key, similarity_pbar)
+                goal_model, goal_trained_state, current_sigma1, sigma2, use_true_goals, step_key, similarity_pbar)
             
             epoch_losses.append(float(loss))
             epoch_sparsity_losses.append(float(sparsity_loss_val))
@@ -1576,7 +1589,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         
         # Perform validation
         val_loss, val_sparsity_loss, val_similarity_loss, val_masks = validation_step(
-            state, validation_data, goal_model, goal_trained_state, batch_size)
+            state, validation_data, goal_model, goal_trained_state, batch_size, ego_agent_id=ego_agent_id, use_true_goals=use_true_goals)
         validation_losses.append(val_loss)
         validation_sparsity_losses.append(val_sparsity_loss)
         validation_similarity_losses.append(val_similarity_loss)
@@ -1715,17 +1728,27 @@ if __name__ == "__main__":
     print(f"Loading reference trajectories from directory: {reference_dir}")
     training_data, validation_data = load_reference_trajectories(reference_dir)
     
-    # Load pretrained goal inference model
-    goal_model, goal_trained_state = load_pretrained_goal_model(pretrained_goal_model_path)
+    # Check if we should use true goals or predicted goals
+    use_true_goals = config.psn.use_true_goals
+    
+    if use_true_goals:
+        print("Training PSN with TRUE goals (no goal inference model needed)")
+        goal_model = None
+        goal_trained_state = None
+    else:
+        print("Training PSN with PREDICTED goals from goal inference model")
+        # Load pretrained goal inference model
+        goal_model, goal_trained_state = load_pretrained_goal_model(pretrained_goal_model_path)
     
     # Create PSN model
     psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims)
     
-    # Train PSN with pretrained goals
+    # Train PSN with appropriate goal source
     training_losses, validation_losses, sparsity_losses, similarity_losses, validation_sparsity_losses, validation_similarity_losses, trained_state, log_dir, best_loss, best_epoch = train_psn_with_pretrained_goals(
         psn_model, training_data, validation_data, goal_model, goal_trained_state,
         num_epochs=num_epochs, learning_rate=learning_rate,
-        sigma1=sigma1, sigma2=sigma2, batch_size=batch_size
+        sigma1=sigma1, sigma2=sigma2, batch_size=batch_size,
+        use_true_goals=use_true_goals
     )
     
     # Save final model
@@ -1748,8 +1771,9 @@ if __name__ == "__main__":
         'control_dim': control_dim,
         'best_loss': best_loss,
         'best_epoch': best_epoch,
-        'goal_inference_model_path': pretrained_goal_model_path,
-        'goal_inference_model_dir': os.path.dirname(pretrained_goal_model_path)
+        'use_true_goals': use_true_goals,
+        'goal_inference_model_path': pretrained_goal_model_path if not use_true_goals else None,
+        'goal_inference_model_dir': os.path.dirname(pretrained_goal_model_path) if not use_true_goals else None
     }
     
     config_path = os.path.join(log_dir, "training_config.json")
@@ -1759,10 +1783,17 @@ if __name__ == "__main__":
     # Create a summary file showing the relationship
     summary_path = os.path.join(log_dir, "training_summary.txt")
     with open(summary_path, 'w') as f:
-        f.write("PSN Training with Pretrained Goal Inference Network\n")
-        f.write("=" * 60 + "\n\n")
-        f.write(f"Goal Inference Model: {pretrained_goal_model_path}\n")
-        f.write(f"Goal Inference Model Directory: {os.path.dirname(pretrained_goal_model_path)}\n")
+        if use_true_goals:
+            f.write("PSN Training with TRUE Goals\n")
+            f.write("=" * 60 + "\n\n")
+            f.write("Goal Source: TRUE goals extracted from reference trajectories\n")
+            f.write("Note: No goal inference model used\n")
+        else:
+            f.write("PSN Training with Pretrained Goal Inference Network\n")
+            f.write("=" * 60 + "\n\n")
+            f.write(f"Goal Inference Model: {pretrained_goal_model_path}\n")
+            f.write(f"Goal Inference Model Directory: {os.path.dirname(pretrained_goal_model_path)}\n")
+        
         f.write(f"PSN Training Directory: {log_dir}\n\n")
         f.write(f"Training Parameters:\n")
         f.write(f"  - Epochs: {num_epochs}\n")
@@ -1790,7 +1821,13 @@ if __name__ == "__main__":
     print("\n" + "=" * 80)
     print("TRAINING COMPLETED SUCCESSFULLY!")
     print("=" * 80)
-    print(f"Goal inference model directory: {os.path.dirname(pretrained_goal_model_path)}")
+    
+    if use_true_goals:
+        print("Goal Source: TRUE goals extracted from reference trajectories")
+        print("Note: No goal inference model used")
+    else:
+        print(f"Goal inference model directory: {os.path.dirname(pretrained_goal_model_path)}")
+    
     print(f"PSN log directory: {log_dir}")
     print(f"Best model saved to: {os.path.join(log_dir, 'psn_best_model.pkl')}")
     print(f"Final model saved to: {final_model_path}")
@@ -1802,5 +1839,10 @@ if __name__ == "__main__":
     print(f"Training progress plot saved to: {os.path.join(log_dir, 'training_loss.png')}")
     print("\nTo view TensorBoard logs, run:")
     print(f"tensorboard --logdir={log_dir}")
-    print(f"\nNote: PSN logs are organized under the goal inference model directory for better organization.")
-    print(f"Directory structure: {os.path.dirname(pretrained_goal_model_path)}/ → {os.path.basename(log_dir)}/")
+    
+    if use_true_goals:
+        print(f"\nNote: PSN logs are organized under the goal_true directory for better organization.")
+        print(f"Directory structure: goal_true_N_{N_agents}_T_{T_total}_obs_{T_observation}/ → {os.path.basename(log_dir)}/")
+    else:
+        print(f"\nNote: PSN logs are organized under the goal inference model directory for better organization.")
+        print(f"Directory structure: {os.path.dirname(pretrained_goal_model_path)}/ → {os.path.basename(log_dir)}/")

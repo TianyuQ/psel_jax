@@ -197,7 +197,7 @@ def create_log_dir(base_name: str, config: Optional[ConfigLoader] = None) -> Pat
     
     # Create structured directory name based on key parameters
     if base_name == "goal_inference":
-        dir_name = (f"goal_inference_N_{config.game.N_agents}_"
+        dir_name = (f"goal_inference_gru_N_{config.game.N_agents}_"
                    f"T_{config.game.T_total}_"
                    f"obs_{config.game.T_observation}_"
                    f"lr_{config.goal_inference.learning_rate}_"
@@ -206,7 +206,7 @@ def create_log_dir(base_name: str, config: Optional[ConfigLoader] = None) -> Pat
                    f"epochs_{config.goal_inference.num_epochs}")
     
     elif base_name == "psn":
-        dir_name = (f"psn_N_{config.game.N_agents}_"
+        dir_name = (f"psn_gru_N_{config.game.N_agents}_"
                    f"T_{config.game.T_total}_"
                    f"obs_{config.goal_inference.observation_length}_"
                    f"lr_{config.psn.learning_rate}_"

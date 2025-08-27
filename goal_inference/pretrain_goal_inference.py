@@ -182,21 +182,19 @@ class GoalInferenceNetwork(nn.Module):
             # Extract trajectory for this agent: (batch_size, T_observation, state_dim)
             agent_traj = x[:, :, agent_idx, :]
             
-            # Process through shared GRU
-            gru_out, _ = nn.GRUCell(
-                features=self.gru_hidden_size,
-                name=f'shared_gru'
-            ).initialize_carry(jax.random.key(0), (batch_size, self.gru_hidden_size))
+            # Use simple GRU cell with manual scanning for compatibility
+            gru_cell = nn.GRUCell(features=self.gru_hidden_size, name=f'gru_agent_{agent_idx}')
+            
+            # Initialize hidden state
+            init_hidden = jnp.zeros((batch_size, self.gru_hidden_size))
             
             # Process sequence step by step
+            hidden = init_hidden
             for t in range(T_observation):
-                gru_out, _ = nn.GRUCell(
-                    features=self.gru_hidden_size,
-                    name=f'shared_gru'
-                )(gru_out, agent_traj[:, t, :])
+                hidden, _ = gru_cell(hidden, agent_traj[:, t, :])
             
-            # Use final GRU output as agent representation
-            agent_features.append(gru_out)
+            # Use final hidden state as agent representation
+            agent_features.append(hidden)
         
         # Concatenate all agent features: (batch_size, N_agents * gru_hidden_size)
         x = jnp.concatenate(agent_features, axis=1)

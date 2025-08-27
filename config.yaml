@@ -55,7 +55,7 @@ optimization:
 reference_generation:
   # Data generation parameters
   num_samples: 512           # Number of reference trajectory samples to generate
-  save_dir: "reference_trajectories_10p"  # Directory to save reference trajectories
+  save_dir: "reference_trajectories_${N_agents}p"  # Directory to save reference trajectories
   
   # Trajectory type
   trajectory_type: "linear" # Type of reference trajectory ["linear", "spline", "polynomial"]
@@ -80,7 +80,7 @@ goal_inference:
   # Training parameters
   learning_rate: 0.001      # Learning rate for Adam optimizer
   batch_size: 32            # Batch size for training
-  num_epochs: 1000          # Number of training epochs
+  num_epochs: 100          # Number of training epochs
   
   # Loss function weights
   goal_loss_weight: 1.0     # Weight for goal prediction loss
@@ -113,8 +113,15 @@ psn:
   num_epochs: 200            # Number of training epochs
   
   # Loss function weights
-  sigma1: 0.1              # Weight for mask sparsity loss
-  sigma2: 0.2               # Weight for mask diversity loss
+  sigma1: 0.05              # Weight for mask sparsity loss
+  sigma2: 0.0               # Weight for mask diversity loss
+  
+  # Goal source configuration
+  # IMPORTANT: This setting affects testing behavior:
+  # - If true: PSN training uses true goals, testing should also use true goals
+  # - If false: PSN training uses goal inference model, testing should also use goal inference model
+  # The testing script will automatically detect this setting to ensure consistency
+  use_true_goals: true     # Whether to use true goals instead of predicted goals from goal inference model
   
   # Mask parameters
   mask_threshold: 0.5       # Threshold for converting continuous to binary mask
@@ -161,9 +168,9 @@ testing:
   
   # Model paths for testing
   # These are template paths that will be dynamically filled based on actual parameters
-  # Format: log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/
-  psn_model_template: "log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{goal_inference_lr}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/psn_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{psn_lr}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{psn_epochs}/psn_best_model.pkl"
-  goal_inference_model_template: "log/goal_inference_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/goal_inference_best_model.pkl"
+  # Format: log/goal_inference_gru_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/
+  psn_model_template: "log/goal_inference_gru_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{goal_inference_lr}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/psn_gru_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{psn_lr}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{psn_epochs}/psn_best_model.pkl"
+  goal_inference_model_template: "log/goal_inference_gru_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_goal_loss_weight_{goal_loss_weight}_epochs_{num_epochs}/goal_inference_best_model.pkl"
   
   # Default model paths (fallback for when templates can't be resolved)
   psn_model: null  # Will be set programmatically based on actual training parameters
@@ -173,11 +180,19 @@ testing:
   receding_horizon:
     # Two-phase approach configuration
     initial_stabilization_iterations: 10  # First 10 iterations use ground truth goals and all agents
-    mask_threshold: 0.3                  # Threshold for agent selection (0.05 -> 0.3)
+    mask_threshold: 0.5                  # Threshold for agent selection (0.05 -> 0.3)
     mask_sparsity_calculation: "fraction" # How to calculate mask sparsity ["fraction", "ratio"]
     
+    # Goal source configuration for testing
+    # This should match the PSN training configuration:
+    # - If PSN was trained with use_true_goals: true, testing should also use true goals
+    # - If PSN was trained with use_true_goals: false, testing should use goal inference model
+    # Set to 'auto' to automatically detect from PSN training config, or manually set to 'true_goals' or 'goal_inference'
+    # Auto-detection tries to read training_config.json first, then falls back to path-based heuristics
+    goal_source: "auto"                  # ["auto", "true_goals", "goal_inference"]
+    
     # Testing configuration
-    num_samples: 5                      # Number of samples to test (2 -> 10)
+    num_samples: 1                      # Number of samples to test (2 -> 10)
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Visualization settings
