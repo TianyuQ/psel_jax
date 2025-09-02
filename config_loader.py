@@ -205,6 +205,38 @@ def create_log_dir(base_name: str, config: Optional[ConfigLoader] = None) -> Pat
                    f"goal_loss_weight_{config.goal_inference.goal_loss_weight}_"
                    f"epochs_{config.goal_inference.num_epochs}")
     
+    elif base_name == "goal_inference_rh":
+        # Check if finetuning is enabled to add appropriate suffix
+        finetune_enabled = getattr(config.goal_inference, 'finetune_with_game_solving', False)
+        base_model_name = "goal_inference_rh_gru_finetune" if finetune_enabled else "goal_inference_rh_gru"
+        
+        dir_name = (f"{base_model_name}_N_{config.game.N_agents}_"
+                   f"T_{config.game.T_total}_"
+                   f"obs_{config.game.T_observation}_"
+                   f"lr_{config.goal_inference.learning_rate}_"
+                   f"bs_{config.goal_inference.batch_size}_"
+                   f"goal_loss_weight_{config.goal_inference.goal_loss_weight}_"
+                   f"epochs_{config.goal_inference.num_epochs}")
+        
+        # Add finetuning-specific parameters if enabled
+        if finetune_enabled:
+            dir_name += (f"_fstart_{config.goal_inference.finetune_start_epoch_ratio}_"
+                        f"flr_{config.goal_inference.finetune_learning_rate}_"
+                        f"simw_{config.goal_inference.similarity_loss_weight}")
+    
+    elif base_name == "goal_inference_rh_gru_finetune":
+        # Handle explicit finetuning case
+        dir_name = (f"goal_inference_rh_gru_finetune_N_{config.game.N_agents}_"
+                   f"T_{config.game.T_total}_"
+                   f"obs_{config.game.T_observation}_"
+                   f"lr_{config.goal_inference.learning_rate}_"
+                   f"bs_{config.goal_inference.batch_size}_"
+                   f"goal_loss_weight_{config.goal_inference.goal_loss_weight}_"
+                   f"epochs_{config.goal_inference.num_epochs}_"
+                   f"fstart_{config.goal_inference.finetune_start_epoch_ratio}_"
+                   f"flr_{config.goal_inference.finetune_learning_rate}_"
+                   f"simw_{config.goal_inference.similarity_loss_weight}")
+    
     elif base_name == "psn":
         dir_name = (f"psn_gru_N_{config.game.N_agents}_"
                    f"T_{config.game.T_total}_"

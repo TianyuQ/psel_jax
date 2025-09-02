@@ -190,8 +190,8 @@ def create_goal_map_visualization(sample_data: Dict[str, Any], results: Dict[str
     # Create a single, focused map plot
     fig, ax = plt.subplots(1, 1, figsize=(12, 10))
     ax.set_aspect('equal')
-    ax.set_xlim(-3, 3)
-    ax.set_ylim(-3, 3)
+    ax.set_xlim(-3.5, 3.5)
+    ax.set_ylim(-3.5, 3.5)
     ax.set_title(f'Sample {sample_id+1}: Goal Prediction Map\n'
                 f'Goal RMSE: {results["goal_prediction_rmse"]:.4f}', fontsize=16)
     ax.set_xlabel('X Position', fontsize=12)
@@ -431,7 +431,7 @@ def main():
     parser.add_argument("--goal_model", type=str, required=True,
                        help="Path to trained goal inference model file")
     parser.add_argument("--reference_file", type=str, 
-                       default=config.paths.goal_inference_data_dir,
+                       default=config.testing.goal_inference_data_dir,
                        help="Path to directory containing ref_traj_sample_*.json files")
     parser.add_argument("--num_samples", type=int, default=config.testing.num_test_samples,
                        help="Number of samples to test")

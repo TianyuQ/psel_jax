@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-Goal Inference Network Pretraining
+Goal Inference Network Pretraining on Receding Horizon Trajectories
 
-This script pretrains a goal inference network for all agents using reference trajectories.
-The network learns to predict goal positions from observation trajectories (first 10 steps).
+This script pretrains a goal inference network using receding horizon trajectories 
+with sliding window inputs. The network learns to predict goal positions from any 
+T_observation-length window of trajectory data (e.g., steps 1-10, 21-30, etc.).
+
+Key improvements:
+- Uses realistic receding horizon trajectory data
+- Supports sliding window inputs from any time segment
+- More robust to different trajectory dynamics
+- Better generalization for real-world deployment
 
 Author: Assistant
 Date: 2024
@@ -28,6 +35,7 @@ import gc
 from torch.utils.tensorboard import SummaryWriter
 import torch.utils.tensorboard as tb
 import random
+import glob
 
 # JAX/Flax imports
 import flax.linen as nn
@@ -61,9 +69,9 @@ setup_jax_config()
 # Game parameters
 N_agents = config.game.N_agents
 T_observation = config.game.T_observation
-T_reference = config.game.T_total
+T_total = config.game.T_total
 state_dim = config.game.state_dim
-goal_dim = 2  # Goal dimension (x, y) - not in config, keeping as constant
+goal_dim = 2  # Goal dimension (x, y)
 
 # Training parameters
 num_epochs = config.goal_inference.num_epochs
@@ -72,31 +80,29 @@ batch_size = config.goal_inference.batch_size
 goal_loss_weight = config.goal_inference.goal_loss_weight
 
 # Network architecture parameters
-# Set hidden dimensions based on number of agents from config
 if N_agents == 4:
     hidden_dims = config.goal_inference.hidden_dims_4p
 elif N_agents == 10:
     hidden_dims = config.goal_inference.hidden_dims_10p
 else:
-    # Default fallback to 4p dimensions
     hidden_dims = config.goal_inference.hidden_dims_4p
     print(f"Warning: Using 4p hidden dimensions {hidden_dims} for {N_agents} agents")
 
-hidden_dim = hidden_dims[0]  # Use first hidden dimension
+gru_hidden_size = config.goal_inference.gru_hidden_size
 dropout_rate = config.goal_inference.dropout_rate
 
 # Data splitting
-validation_split = 0.25  # 1/4 for validation - not in config, keeping as constant
+validation_split = 0.25
 
-# File paths - use training data directory for training
-reference_dir = config.training.data_dir
+# File paths - use receding horizon trajectories for training
+rh_data_dir = f"receding_horizon_trajectories_{N_agents}p"
 
 # Random seed
 random_seed = config.training.seed
 
 # Testing parameters
 num_eval_samples = config.testing.num_test_samples
-num_vis_samples = min(5, num_eval_samples)  # Number of samples for visualization
+num_vis_samples = min(5, num_eval_samples)
 
 # Plot parameters
 plot_dpi = config.reference_generation.plot_dpi
@@ -129,16 +135,14 @@ def get_activation_fn(activation_name):
 
 activation_fn = get_activation_fn(activation_function)
 
-# Device selection - Always use GPU for training
-# Force GPU usage
+# Device selection
 gpu_devices = jax.devices("gpu")
 if gpu_devices:
     device = gpu_devices[0]
     print(f"Using GPU: {device}")
-    # JAX platform is configured via setup_jax_config()
     print("JAX platform configured via config")
     
-    # Test GPU functionality with a simple operation
+    # Test GPU functionality
     test_array = jax.random.normal(jax.random.PRNGKey(0), (10, 10))
     test_result = jnp.linalg.inv(test_array)
     print("GPU matrix operations working correctly")
@@ -147,7 +151,7 @@ else:
 
 
 # ============================================================================
-# GOAL INFERENCE NETWORK DEFINITION
+# GOAL INFERENCE NETWORK DEFINITION (same as original)
 # ============================================================================
 
 class GoalInferenceNetwork(nn.Module):
@@ -203,147 +207,207 @@ class GoalInferenceNetwork(nn.Module):
         for i, hidden_dim in enumerate(self.hidden_dims):
             x = nn.Dense(features=hidden_dim, name=f'goal_head_{i}')(x)
             x = activation_fn(x)
-            if i < len(self.hidden_dims) - 1:  # Don't apply dropout to last layer
+            if i < len(self.hidden_dims) - 1:
                 x = nn.Dropout(rate=self.dropout_rate, name=f'goal_dropout_{i}')(x, deterministic=deterministic)
         
         # Goal prediction output
         goals = nn.Dense(features=self.goal_output_dim, name='goal_output')(x)
-        # No activation for goals - they can be any real values
         
         return goals
 
 
 # ============================================================================
-# LOSS FUNCTIONS
+# LOSS FUNCTIONS (same as original)
 # ============================================================================
 
 def goal_prediction_loss(predicted_goals: jnp.ndarray, true_goals: jnp.ndarray) -> jnp.ndarray:
     """
     Goal prediction loss using Huber loss for robustness.
-    
-    Args:
-        predicted_goals: Predicted goal positions (batch_size, N_agents * goal_dim)
-        true_goals: True goal positions (batch_size, N_agents * goal_dim)
-        
-    Returns:
-        Goal prediction loss value
     """
-    # Reshape to (batch_size, N_agents, goal_dim) for per-agent computation
     batch_size = predicted_goals.shape[0]
     predicted_goals_reshaped = predicted_goals.reshape(batch_size, N_agents, goal_dim)
     true_goals_reshaped = true_goals.reshape(batch_size, N_agents, goal_dim)
     
-    # Compute Huber loss for each agent's goal prediction
-    goal_diff = predicted_goals_reshaped - true_goals_reshaped  # (batch_size, N_agents, goal_dim)
+    goal_diff = predicted_goals_reshaped - true_goals_reshaped
     
     # Huber loss parameters
     delta = 1.0
     
-    # Compute Huber loss: more robust than MSE for outliers
     abs_diff = jnp.abs(goal_diff)
     quadratic = jnp.minimum(abs_diff, delta)
     linear = abs_diff - quadratic
     huber_loss_per_dim = 0.5 * quadratic**2 + delta * linear
     
     # Sum over x,y dimensions for each agent
-    per_agent_error = jnp.sum(huber_loss_per_dim, axis=2)  # (batch_size, N_agents)
+    per_agent_error = jnp.sum(huber_loss_per_dim, axis=2)
     
     # Take mean over N agents for each sample, then mean over all samples
-    mean_per_sample = jnp.mean(per_agent_error, axis=1)  # (batch_size,) - mean over agents
-    total_loss = jnp.mean(mean_per_sample)  # scalar - mean over samples
+    mean_per_sample = jnp.mean(per_agent_error, axis=1)
+    total_loss = jnp.mean(mean_per_sample)
     
     return total_loss
 
 
 # ============================================================================
-# REFERENCE TRAJECTORY LOADING
+# RECEDING HORIZON TRAJECTORY LOADING WITH SLIDING WINDOWS
 # ============================================================================
 
-def load_and_split_reference_trajectories(data_dir: str, validation_split: float = 0.25) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def normalize_receding_horizon_data(rh_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Load reference trajectories from directory containing individual JSON files and split into training/validation sets.
+    Normalize receding horizon data to standard format.
+    """
+    normalized_data = rh_data.copy()
+    
+    if "receding_horizon_trajectories" in rh_data and "trajectories" not in rh_data:
+        normalized_data["trajectories"] = {}
+        
+        for agent_key, agent_data in rh_data["receding_horizon_trajectories"].items():
+            if "states" in agent_data:
+                # Use the actual executed states from receding horizon
+                normalized_data["trajectories"][agent_key] = {"states": agent_data["states"]}
+            else:
+                # Fallback
+                normalized_data["trajectories"][agent_key] = {"states": [[0.0, 0.0, 0.0, 0.0] for _ in range(T_total)]}
+    
+    return normalized_data
+
+def load_receding_horizon_trajectories(data_dir: str, validation_split: float = 0.25) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Load receding horizon trajectories and split into training/validation sets.
     
     Args:
-        data_dir: Path to directory containing ref_traj_sample_*.json files
+        data_dir: Path to directory containing receding_horizon_sample_*.json files
         validation_split: Fraction of data to use for validation
         
     Returns:
         training_data: List of training samples
         validation_data: List of validation samples
     """
-    import glob
-    
-    # Find all ref_traj_sample_*.json files in the directory
-    pattern = os.path.join(data_dir, "ref_traj_sample_*.json")
+    # Find all receding_horizon_sample_*.json files
+    pattern = os.path.join(data_dir, "receding_horizon_sample_*.json")
     json_files = sorted(glob.glob(pattern))
     
     if not json_files:
-        raise FileNotFoundError(f"No ref_traj_sample_*.json files found in directory: {data_dir}")
+        raise FileNotFoundError(f"No receding_horizon_sample_*.json files found in directory: {data_dir}")
     
     # Load all samples
-    reference_data = []
+    rh_data = []
     for json_file in json_files:
         try:
             with open(json_file, 'r') as f:
                 sample_data = json.load(f)
-                reference_data.append(sample_data)
+                # Normalize the data structure
+                normalized_data = normalize_receding_horizon_data(sample_data)
+                rh_data.append(normalized_data)
         except Exception as e:
             print(f"Warning: Failed to load {json_file}: {e}")
             continue
     
-    total_samples = len(reference_data)
+    total_samples = len(rh_data)
     validation_size = int(total_samples * validation_split)
     training_size = total_samples - validation_size
     
     # Shuffle data for random split
-    random.shuffle(reference_data)
+    random.shuffle(rh_data)
     
-    training_data = reference_data[:training_size]
-    validation_data = reference_data[training_size:]
+    training_data = rh_data[:training_size]
+    validation_data = rh_data[training_size:]
     
-    print(f"Loaded {total_samples} reference trajectory samples")
+    print(f"Loaded {total_samples} receding horizon trajectory samples")
     print(f"Training samples: {len(training_data)}")
     print(f"Validation samples: {len(validation_data)}")
     
     return training_data, validation_data
 
-
-def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
+def extract_sliding_window_trajectories(sample_data: Dict[str, Any], window_start: int) -> jnp.ndarray:
     """
-    Extract observation trajectory (first 10 steps) for all agents.
+    Extract a sliding window of trajectory data from any position.
     
     Args:
-        sample_data: Reference trajectory sample
+        sample_data: Trajectory sample data
+        window_start: Starting step for the sliding window (0-indexed)
         
     Returns:
-        observation_trajectory: Observation trajectory (T_observation, N_agents, state_dim)
+        observation_trajectory: (T_observation, N_agents, state_dim)
     """
     # Initialize array to store all agent states
-    # Shape: (T_observation, N_agents, state_dim)
     observation_trajectory = jnp.zeros((T_observation, N_agents, state_dim))
     
     for i in range(N_agents):
         agent_key = f"agent_{i}"
         states = sample_data["trajectories"][agent_key]["states"]
-        # Take first T_observation steps
-        agent_states = jnp.array(states[:T_observation])  # (T_observation, state_dim)
-        # Place in the correct position: (T_observation, N_agents, state_dim)
+        
+        # Extract T_observation steps starting from window_start
+        window_end = window_start + T_observation
+        
+        if window_end <= len(states):
+            # Normal case: full window fits within trajectory
+            agent_states = jnp.array(states[window_start:window_end])
+        else:
+            # Edge case: pad with last state if window extends beyond trajectory
+            available_states = states[window_start:] if window_start < len(states) else []
+            if available_states:
+                agent_states_padded = available_states[:]
+                last_state = available_states[-1]
+                while len(agent_states_padded) < T_observation:
+                    agent_states_padded.append(last_state)
+                agent_states = jnp.array(agent_states_padded)
+            else:
+                # If window_start is beyond trajectory, use last state
+                last_state = states[-1] if states else [0.0, 0.0, 0.0, 0.0]
+                agent_states = jnp.array([last_state for _ in range(T_observation)])
+        
+        # Place in the correct position
         observation_trajectory = observation_trajectory.at[:, i, :].set(agent_states)
     
     return observation_trajectory
 
-
 def extract_reference_goals(sample_data: Dict[str, Any]) -> jnp.ndarray:
+    """Extract goal positions for all agents."""
+    return jnp.array(sample_data["target_positions"])
+
+def generate_sliding_window_samples(rh_data: List[Dict[str, Any]], samples_per_trajectory: int = 5) -> List[Tuple[jnp.ndarray, jnp.ndarray]]:
     """
-    Extract goal positions for all agents from reference data.
+    Generate multiple sliding window samples from each receding horizon trajectory.
     
     Args:
-        sample_data: Reference trajectory sample
+        rh_data: List of receding horizon trajectory samples
+        samples_per_trajectory: Number of sliding windows to extract per trajectory
         
     Returns:
-        goals: Goal positions for all agents (N_agents, goal_dim)
+        List of (observation_window, goals) tuples
     """
-    return jnp.array(sample_data["target_positions"])  # (N_agents, goal_dim)
+    sliding_samples = []
+    
+    for sample_data in rh_data:
+        goals = extract_reference_goals(sample_data)
+        
+        # Calculate maximum valid starting positions for sliding windows
+        # Assume trajectory length is T_total (50 steps)
+        max_start = max(0, T_total - T_observation)  # 50 - 10 = 40, so starts 0-40
+        
+        if max_start <= 0:
+            # If trajectory is too short, only use starting from 0
+            window_starts = [0]
+        else:
+            # Generate evenly spaced window starting positions
+            if samples_per_trajectory == 1:
+                window_starts = [0]  # Just use the beginning
+            else:
+                window_starts = np.linspace(0, max_start, samples_per_trajectory, dtype=int)
+        
+        for window_start in window_starts:
+            try:
+                obs_window = extract_sliding_window_trajectories(sample_data, window_start)
+                sliding_samples.append((obs_window, goals))
+            except Exception as e:
+                print(f"Warning: Failed to extract window starting at step {window_start}: {e}")
+                continue
+    
+    print(f"Generated {len(sliding_samples)} sliding window samples from {len(rh_data)} trajectories")
+    print(f"Average {len(sliding_samples)/len(rh_data):.1f} windows per trajectory")
+    
+    return sliding_samples
 
 
 # ============================================================================
@@ -351,20 +415,10 @@ def extract_reference_goals(sample_data: Dict[str, Any]) -> jnp.ndarray:
 # ============================================================================
 
 def create_train_state(model: nn.Module, learning_rate: float) -> train_state.TrainState:
-    """
-    Create training state for the model.
-    
-    Args:
-        model: Goal inference model
-        learning_rate: Learning rate for optimization
-        
-    Returns:
-        Train state
-    """
-    # Create optimizer with weight decay (AdamW)
+    """Create training state for the model."""
     optimizer = optax.adamw(
         learning_rate=learning_rate,
-        weight_decay=5e-4  # L2 regularization to prevent overfitting
+        weight_decay=5e-4
     )
     
     # Create dummy input for initialization
@@ -385,33 +439,15 @@ def create_train_state(model: nn.Module, learning_rate: float) -> train_state.Tr
     
     return state
 
-
 def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndarray],
                goal_loss_weight: float = 1.0, rng: jnp.ndarray = None) -> Tuple[train_state.TrainState, jnp.ndarray, jnp.ndarray]:
-    """
-    Single training step.
-    
-    Args:
-        state: Current train state
-        batch: Tuple of (observations, true_goals)
-        goal_loss_weight: Weight for goal prediction loss
-        rng: Random key for dropout operations
-        
-    Returns:
-        Updated train state, total loss value, and goal prediction loss value
-    """
+    """Single training step."""
     observations, true_goals = batch
     
     def loss_fn(params):
-        # Apply the model with the given parameters and random key for dropout
         predicted_goals = state.apply_fn({'params': params}, observations, rngs={'dropout': rng}, deterministic=False)
-        
-        # Compute goal prediction loss
         goal_loss_val = goal_prediction_loss(predicted_goals, true_goals)
-        
-        # Total loss
         total_loss_val = goal_loss_weight * goal_loss_val
-        
         return total_loss_val, goal_loss_val
     
     # Compute gradients
@@ -422,13 +458,12 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
     
     return state, loss, goal_loss_val
 
-
-def prepare_batch(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def prepare_batch(batch_data: List[Tuple[jnp.ndarray, jnp.ndarray]]) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Prepare a batch of data for training.
+    Prepare a batch of sliding window data for training.
     
     Args:
-        batch_data: List of data samples
+        batch_data: List of (observation_window, goals) tuples
         
     Returns:
         observations: Batch of observations (batch_size, T_observation * N_agents * state_dim)
@@ -437,14 +472,9 @@ def prepare_batch(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.ndarray, jnp.nd
     batch_obs = []
     batch_true_goals = []
     
-    for sample_data in batch_data:
-        # Extract observation trajectory (first 10 steps of all agents)
-        obs_traj = extract_observation_trajectory(sample_data)
-        batch_obs.append(obs_traj.flatten())  # Flatten to 1D
-        
-        # Extract true goals for this sample
-        true_goals = extract_reference_goals(sample_data).flatten()  # Flatten to (N_agents * goal_dim)
-        batch_true_goals.append(true_goals)
+    for obs_window, goals in batch_data:
+        batch_obs.append(obs_window.flatten())  # Flatten to 1D
+        batch_true_goals.append(goals.flatten())  # Flatten to (N_agents * goal_dim)
     
     # Pad batch if necessary
     if len(batch_obs) < batch_size:
@@ -462,32 +492,20 @@ def prepare_batch(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.ndarray, jnp.nd
     
     return batch_obs, batch_true_goals
 
-
 def evaluate_epoch(goal_model: GoalInferenceNetwork, 
                   state: train_state.TrainState, 
-                  validation_data: List[Dict[str, Any]], 
+                  validation_samples: List[Tuple[jnp.ndarray, jnp.ndarray]], 
                   batch_size: int) -> float:
-    """
-    Evaluate the model on validation data for one epoch.
-    
-    Args:
-        goal_model: Goal inference network
-        state: Current model state
-        validation_data: Validation data samples
-        batch_size: Batch size for evaluation
-        
-    Returns:
-        Average validation loss
-    """
+    """Evaluate the model on validation data for one epoch."""
     val_losses = []
     
     # Create batches for validation
-    num_batches = (len(validation_data) + batch_size - 1) // batch_size
+    num_batches = (len(validation_samples) + batch_size - 1) // batch_size
     
     for batch_idx in range(num_batches):
         start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, len(validation_data))
-        batch_data = validation_data[start_idx:end_idx]
+        end_idx = min(start_idx + batch_size, len(validation_samples))
+        batch_data = validation_samples[start_idx:end_idx]
         
         # Prepare batch
         observations, true_goals = prepare_batch(batch_data)
@@ -501,39 +519,21 @@ def evaluate_epoch(goal_model: GoalInferenceNetwork,
     
     return np.mean(val_losses)
 
-
-def train_goal_inference_network(goal_model: GoalInferenceNetwork, 
-                                training_data: List[Dict[str, Any]],
-                                validation_data: List[Dict[str, Any]],
-                                num_epochs: int = 50, 
-                                learning_rate: float = 0.001,
-                                batch_size: int = 32,
-                                goal_loss_weight: float = 1.0) -> Tuple[List[float], train_state.TrainState, str, float, int]:
-    """
-    Train the goal inference network with training and validation.
-    
-    Args:
-        goal_model: Goal inference network to train
-        training_data: Training data samples
-        validation_data: Validation data samples
-        num_epochs: Number of training epochs
-        learning_rate: Learning rate for optimization
-        batch_size: Batch size for training
-        goal_loss_weight: Weight for goal prediction loss
-        
-    Returns:
-        losses: List of training losses per epoch
-        trained_state: Final trained state
-        log_dir: Directory where logs are saved
-        best_loss: Best loss achieved during training
-        best_epoch: Epoch where best loss was achieved
-    """
-    print(f"Training Goal Inference Network with {len(training_data)} training samples and {len(validation_data)} validation samples...")
+def train_goal_inference_network_rh(goal_model: GoalInferenceNetwork, 
+                                   training_samples: List[Tuple[jnp.ndarray, jnp.ndarray]],
+                                   validation_samples: List[Tuple[jnp.ndarray, jnp.ndarray]],
+                                   num_epochs: int = 50, 
+                                   learning_rate: float = 0.001,
+                                   batch_size: int = 32,
+                                   goal_loss_weight: float = 1.0) -> Tuple[List[float], train_state.TrainState, str, float, int]:
+    """Train the goal inference network with receding horizon sliding window data."""
+    print(f"Training Goal Inference Network on Receding Horizon data...")
+    print(f"Training samples: {len(training_samples)}, Validation samples: {len(validation_samples)}")
     print(f"Parameters: epochs={num_epochs}, lr={learning_rate}, batch_size={batch_size}")
-    print(f"Observation steps: {T_observation}, Reference steps: {T_reference}")
+    print(f"Observation window length: {T_observation}, Total trajectory length: {T_total}")
     
-    # Create log directory
-    log_dir = create_log_dir("goal_inference", config)
+    # Create log directory with RH suffix to distinguish from reference trajectory training
+    log_dir = create_log_dir("goal_inference_rh", config)
     
     # Initialize TensorBoard writer
     writer = SummaryWriter(log_dir=log_dir)
@@ -556,15 +556,15 @@ def train_goal_inference_network(goal_model: GoalInferenceNetwork,
         epoch_losses = []
         
         # Shuffle training data for each epoch
-        random.shuffle(training_data)
+        random.shuffle(training_samples)
         
         # Create batches
-        num_batches = (len(training_data) + batch_size - 1) // batch_size
+        num_batches = (len(training_samples) + batch_size - 1) // batch_size
         
         for batch_idx in range(num_batches):
             start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, len(training_data))
-            batch_data = training_data[start_idx:end_idx]
+            end_idx = min(start_idx + batch_size, len(training_samples))
+            batch_data = training_samples[start_idx:end_idx]
             
             # Prepare batch
             observations, true_goals = prepare_batch(batch_data)
@@ -581,12 +581,12 @@ def train_goal_inference_network(goal_model: GoalInferenceNetwork,
         losses.append(avg_loss)
         
         # Validation
-        val_loss = evaluate_epoch(goal_model, state, validation_data, batch_size)
+        val_loss = evaluate_epoch(goal_model, state, validation_samples, batch_size)
         
         # Update progress bar
         progress_bar.set_postfix({'Avg Loss': f'{avg_loss:.4f}', 'Val Loss': f'{val_loss:.4f}'})
         
-        # Log to TensorBoard (only goal prediction loss over epochs)
+        # Log to TensorBoard
         writer.add_scalar('Loss/Training', avg_loss, epoch)
         writer.add_scalar('Loss/Validation', val_loss, epoch)
         
@@ -594,30 +594,25 @@ def train_goal_inference_network(goal_model: GoalInferenceNetwork,
         if val_loss < best_loss:
             best_loss = val_loss
             best_epoch = epoch + 1
-            save_model(state, log_dir, "goal_inference_best_model.pkl")
+            save_model(state, log_dir, "goal_inference_rh_best_model.pkl")
             print(f"New best model found at epoch {best_epoch} with validation loss: {best_loss:.4f}")
-            print(f"Best model saved to: {log_dir}/goal_inference_best_model.pkl")
-        
-
     
     # Close TensorBoard writer
     writer.close()
     
     # Save final model
-    save_model(state, log_dir, "goal_inference_final_model.pkl")
+    save_model(state, log_dir, "goal_inference_rh_final_model.pkl")
     
     # Save training configuration
     save_training_config(log_dir, num_epochs, learning_rate, batch_size, goal_loss_weight)
     
     print(f"\nTraining completed!")
     print(f"Log directory: {log_dir}")
-    print(f"Best model saved to: {log_dir}/goal_inference_best_model.pkl")
-    print(f"Training results saved to: {log_dir}/training_results.json")
+    print(f"Best model saved to: {log_dir}/goal_inference_rh_best_model.pkl")
     print(f"Final training loss: {losses[-1]:.4f}")
     print(f"Best validation loss: {best_loss:.4f} (achieved at epoch {best_epoch})")
     
     return losses, state, log_dir, best_loss, best_epoch
-
 
 def save_model(state: train_state.TrainState, log_dir: str, filename: str):
     """Save model to file."""
@@ -626,20 +621,24 @@ def save_model(state: train_state.TrainState, log_dir: str, filename: str):
     with open(model_path, 'wb') as f:
         pickle.dump(model_bytes, f)
 
-
 def save_training_config(log_dir: str, num_epochs: int, learning_rate: float, batch_size: int, goal_loss_weight: float):
     """Save training configuration to JSON file."""
     training_results = {
+        'training_data_type': 'receding_horizon_trajectories',
+        'sliding_window_approach': True,
         'num_epochs': num_epochs,
         'learning_rate': learning_rate,
         'batch_size': batch_size,
         'goal_loss_weight': goal_loss_weight,
         'N_agents': N_agents,
         'T_observation': T_observation,
-        'T_reference': T_reference,
+        'T_total': T_total,
         'state_dim': state_dim,
         'goal_dim': goal_dim,
-        'validation_split': validation_split
+        'validation_split': validation_split,
+        'gru_hidden_size': gru_hidden_size,
+        'hidden_dims': hidden_dims,
+        'dropout_rate': dropout_rate
     }
     
     training_results_path = os.path.join(log_dir, 'training_results.json')
@@ -647,45 +646,34 @@ def save_training_config(log_dir: str, num_epochs: int, learning_rate: float, ba
         json.dump(training_results, f, indent=2)
 
 
+# ============================================================================
+# EVALUATION AND VISUALIZATION FUNCTIONS
+# ============================================================================
 
-def evaluate_goal_inference_model(model: nn.Module, trained_state: train_state.TrainState, 
-                                reference_data: List[Dict[str, Any]], num_samples: int = 20) -> Dict[str, float]:
-    """
-    Evaluate the trained goal inference model on goal prediction accuracy.
-    
-    Args:
-        model: Goal inference model
-        trained_state: Trained model state
-        reference_data: Reference trajectory data
-        num_samples: Number of samples to evaluate
-        
-    Returns:
-        Dictionary containing evaluation metrics
-    """
-    print(f"\nEvaluating Goal Inference model on {num_samples} samples...")
+def evaluate_goal_inference_model_rh(model: nn.Module, trained_state: train_state.TrainState, 
+                                    validation_samples: List[Tuple[jnp.ndarray, jnp.ndarray]], 
+                                    num_samples: int = 20) -> Dict[str, float]:
+    """Evaluate the trained goal inference model on goal prediction accuracy."""
+    print(f"\nEvaluating Goal Inference model on {num_samples} sliding window samples...")
     
     goal_prediction_errors = []
     
     # Sample random indices
     rng = jax.random.PRNGKey(random_seed)
     rng, sample_key = jax.random.split(rng)
-    sample_indices = jax.random.choice(sample_key, len(reference_data), shape=(num_samples,), replace=False)
+    sample_indices = jax.random.choice(sample_key, len(validation_samples), shape=(num_samples,), replace=False)
     
     for idx in sample_indices:
-        sample_data = reference_data[idx]
+        obs_window, true_goals = validation_samples[idx]
         
-        # Extract observation trajectory
-        obs_traj = extract_observation_trajectory(sample_data)
-        obs_input = obs_traj.flatten().reshape(1, -1)  # Add batch dimension
+        # Add batch dimension and flatten
+        obs_input = obs_window.flatten().reshape(1, -1)
         
         # Get model predictions
         predicted_goals = trained_state.apply_fn({'params': trained_state.params}, obs_input, deterministic=True)
         
-        # Extract true goals
-        true_goals = extract_reference_goals(sample_data).flatten()
-        
         # Compute goal prediction error
-        goal_error = jnp.mean(jnp.square(predicted_goals[0] - true_goals))
+        goal_error = jnp.mean(jnp.square(predicted_goals[0] - true_goals.flatten()))
         goal_prediction_errors.append(float(goal_error))
     
     # Compute metrics
@@ -704,141 +692,66 @@ def evaluate_goal_inference_model(model: nn.Module, trained_state: train_state.T
     return metrics
 
 
-def visualize_goal_predictions(model: nn.Module, trained_state: train_state.TrainState,
-                              reference_data: List[Dict[str, Any]], num_samples: int = 5, 
-                              save_dir: str = None) -> None:
-    """
-    Visualize goal predictions vs true goals for selected samples.
-    
-    Args:
-        model: Goal inference model
-        trained_state: Trained model state
-        reference_data: Reference trajectory data
-        num_samples: Number of samples to visualize
-        save_dir: Directory to save plots
-    """
-    print(f"\nVisualizing goal predictions for {num_samples} samples...")
-    
-    # Sample random indices
-    rng = jax.random.PRNGKey(random_seed)
-    rng, sample_key = jax.random.split(rng)
-    sample_indices = jax.random.choice(sample_key, len(reference_data), shape=(num_samples,), replace=False)
-    
-    for i, idx in enumerate(sample_indices):
-        sample_data = reference_data[idx]
-        
-        # Extract observation trajectory
-        obs_traj = extract_observation_trajectory(sample_data)
-        obs_input = obs_traj.flatten().reshape(1, -1)  # Add batch dimension
-        
-        # Get model predictions
-        predicted_goals = trained_state.apply_fn({'params': trained_state.params}, obs_input, deterministic=True)
-        
-        # Extract true goals and initial positions
-        true_goals = extract_reference_goals(sample_data)
-        init_positions = jnp.array(sample_data["init_positions"])
-        
-        # Reshape predicted goals
-        predicted_goals = predicted_goals[0].reshape(N_agents, goal_dim)
-        
-        # Create visualization
-        fig, ax = plt.subplots(1, 1, figsize=(12, 10))
-        ax.set_aspect('equal')
-        ax.set_xlim(-boundary_size, boundary_size)
-        ax.set_ylim(-boundary_size, boundary_size)
-        ax.set_title(f'Sample {i+1}: Goal Predictions vs True Goals')
-        ax.set_xlabel('X Position')
-        ax.set_ylabel('Y Position')
-        ax.grid(True, alpha=0.3)
-        
-        # Color palette for agents
-        colors = plt.cm.tab10(np.linspace(0, 1, N_agents))
-        
-        # Plot initial positions
-        for j in range(N_agents):
-            ax.plot(init_positions[j][0], init_positions[j][1], 'o', 
-                   color=colors[j], markersize=10, alpha=0.7, label=f'Agent {j} Start')
-        
-        # Plot true goals
-        for j in range(N_agents):
-            ax.plot(true_goals[j][0], true_goals[j][1], 's', 
-                   color=colors[j], markersize=12, alpha=0.8, label=f'Agent {j} True Goal')
-        
-        # Plot predicted goals
-        for j in range(N_agents):
-            ax.plot(predicted_goals[j][0], predicted_goals[j][1], '^', 
-                   color=colors[j], markersize=12, alpha=0.8, label=f'Agent {j} Predicted Goal')
-        
-        # Draw lines from initial to predicted goals
-        for j in range(N_agents):
-            ax.plot([init_positions[j][0], predicted_goals[j][0]], 
-                   [init_positions[j][1], predicted_goals[j][1]], 
-                   '--', color=colors[j], alpha=0.5, linewidth=2)
-        
-        # Add legend
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        
-        plt.tight_layout()
-        
-        # Save plot if save_dir is provided
-        if save_dir:
-            plot_path = os.path.join(save_dir, f"goal_predictions_sample_{i+1:03d}.{plot_format}")
-            plt.savefig(plot_path, dpi=plot_dpi, bbox_inches='tight')
-            print(f"Goal prediction plot saved to: {plot_path}")
-        
-        # Always close the plot to free memory
-        plt.close()
-
-
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Goal Inference Network Pretraining")
+    print("Goal Inference Network Pretraining on Receding Horizon Trajectories")
     print("=" * 60)
     print(f"Configuration loaded from: config.yaml")
-    print(f"Game parameters: N_agents={N_agents}, T_observation={T_observation}, T_reference={T_reference}")
+    print(f"Game parameters: N_agents={N_agents}, T_observation={T_observation}, T_total={T_total}")
     print(f"Training parameters: epochs={num_epochs}, lr={learning_rate}, batch_size={batch_size}")
-    print(f"Network parameters: hidden_dim={hidden_dim}, dropout_rate={dropout_rate}")
+    print(f"Network parameters: hidden_dims={hidden_dims}, gru_hidden_size={gru_hidden_size}, dropout_rate={dropout_rate}")
     print("=" * 60)
     
-    # Load reference trajectories
-    print(f"Loading reference trajectories from directory: {reference_dir}...")
-    training_data, validation_data = load_and_split_reference_trajectories(reference_dir, validation_split)
+    # Load receding horizon trajectories
+    print(f"Loading receding horizon trajectories from directory: {rh_data_dir}...")
+    training_data, validation_data = load_receding_horizon_trajectories(rh_data_dir, validation_split)
     
-    # Create goal inference model with appropriate hidden dimensions
-    goal_model = GoalInferenceNetwork(hidden_dims=hidden_dims)
+    # Generate sliding window samples
+    print(f"Generating sliding window samples...")
+    samples_per_trajectory = 5  # Extract 5 different windows per trajectory
+    training_samples = generate_sliding_window_samples(training_data, samples_per_trajectory)
+    validation_samples = generate_sliding_window_samples(validation_data, samples_per_trajectory)
+    
+    print(f"Final dataset sizes:")
+    print(f"  Training sliding windows: {len(training_samples)}")
+    print(f"  Validation sliding windows: {len(validation_samples)}")
+    
+    # Create goal inference model
+    goal_model = GoalInferenceNetwork(
+        hidden_dims=hidden_dims,
+        gru_hidden_size=gru_hidden_size,
+        dropout_rate=dropout_rate
+    )
     
     # Train the goal inference network
-    print("Training Goal Inference Network...")
-    losses, trained_state, log_dir, best_loss, best_epoch = train_goal_inference_network(
-        goal_model, training_data, validation_data, 
+    print("Training Goal Inference Network on Receding Horizon data...")
+    losses, trained_state, log_dir, best_loss, best_epoch = train_goal_inference_network_rh(
+        goal_model, training_samples, validation_samples, 
         num_epochs=num_epochs, 
         learning_rate=learning_rate,
         batch_size=batch_size, 
         goal_loss_weight=goal_loss_weight
     )
     
-    # Save best trained model
-    best_model_bytes = flax.serialization.to_bytes(trained_state)
-    best_model_path = os.path.join(log_dir, "goal_inference_best_model.pkl")
-    with open(best_model_path, 'wb') as f:
-        pickle.dump(best_model_bytes, f)
-    
-    # Save training config with additional training results
+    # Save training results
     training_results = {
+        'training_data_type': 'receding_horizon_trajectories',
+        'sliding_window_approach': True,
         'N_agents': N_agents,
         'T_observation': T_observation,
-        'T_reference': T_reference,
+        'T_total': T_total,
         'learning_rate': learning_rate,
         'batch_size': batch_size,
         'goal_loss_weight': goal_loss_weight,
         'num_epochs': num_epochs,
+        'samples_per_trajectory': samples_per_trajectory,
         'final_loss': float(losses[-1]),
         'best_loss': float(best_loss),
-        'best_epoch': int(best_epoch + 1),
+        'best_epoch': int(best_epoch),
         'timestamp': datetime.now().isoformat(),
         'config_source': 'config.yaml'
     }
@@ -848,13 +761,13 @@ if __name__ == "__main__":
     
     print(f"\nTraining completed!")
     print(f"Log directory: {log_dir}")
-    print(f"Best model saved to: {best_model_path}")
+    print(f"Best model saved to: {log_dir}/goal_inference_rh_best_model.pkl")
     print(f"Training results saved to: {config_path}")
     print(f"Final loss: {losses[-1]:.4f}")
-    print(f"Best loss: {best_loss:.4f} (achieved at epoch {best_epoch+1})")
+    print(f"Best loss: {best_loss:.4f} (achieved at epoch {best_epoch})")
     
     # Evaluate the trained model
-    evaluation_metrics = evaluate_goal_inference_model(goal_model, trained_state, validation_data, num_samples=num_eval_samples)
+    evaluation_metrics = evaluate_goal_inference_model_rh(goal_model, trained_state, validation_samples, num_samples=num_eval_samples)
     
     # Save evaluation metrics
     metrics_path = os.path.join(log_dir, "evaluation_metrics.json")
@@ -862,13 +775,10 @@ if __name__ == "__main__":
         json.dump(evaluation_metrics, f, indent=2)
     print(f"Evaluation metrics saved to: {metrics_path}")
     
-    # Visualize goal predictions
-    visualize_goal_predictions(goal_model, trained_state, validation_data, num_samples=num_vis_samples, save_dir=log_dir)
-    
     # Plot training loss
     plt.figure(figsize=(10, 6))
     plt.plot(losses)
-    plt.title('Goal Inference Training Loss')
+    plt.title('Goal Inference Training Loss (Receding Horizon Data)')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.grid(True)
@@ -878,3 +788,5 @@ if __name__ == "__main__":
     
     print(f"Training loss plot saved to: {plot_path}")
     print(f"\nTo view TensorBoard logs, run: tensorboard --logdir={log_dir}")
+    print(f"\nThis model can now be used for PSN testing with receding horizon trajectories!")
+    print(f"The sliding window approach makes it robust to different trajectory segments.")

@@ -329,8 +329,8 @@ def plot_trajectories(state_trajectories: list, reference_trajectories: list,
     
     # Set up the plot
     ax.set_aspect('equal')
-    ax.set_xlim(-3, 3)
-    ax.set_ylim(-3, 3)
+    ax.set_xlim(-3.5, 3.5)
+    ax.set_ylim(-3.5, 3.5)
     ax.set_title(f'iLQGames N={n_agents} - Optimized Trajectories\n(Exponential Collision Avoidance)')
     ax.set_xlabel('X Position')
     ax.set_ylabel('Y Position')
@@ -396,8 +396,8 @@ def create_animation(state_trajectories: list, reference_trajectories: list,
     def update(t):
         ax.cla()
         ax.set_aspect('equal')
-        ax.set_xlim(-3, 3)
-        ax.set_ylim(-3, 3)
+        ax.set_xlim(-3.5, 3.5)
+        ax.set_ylim(-3.5, 3.5)
         ax.set_title(f'iLQGames N={n_agents} - Time Step {t}/{tsteps}')
         ax.grid(True, alpha=0.3)
         

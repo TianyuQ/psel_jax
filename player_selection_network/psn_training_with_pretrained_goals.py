@@ -123,10 +123,10 @@ sigma2 = config.psn.sigma2  # Binary loss weight
 # Game solving parameters
 num_iters = config.optimization.num_iters
 
-# Reference trajectory parameters
+# Reference trajectory parameters - use training data directory for training
 # Use dataset directory for loading individual sample files
 # This directory contains ref_traj_sample_*.json files
-reference_dir = config.paths.reference_data_dir
+reference_dir = config.training.data_dir
 
 # Pretrained goal inference model path
 # Use the template to generate the path based on current config parameters
@@ -1283,7 +1283,7 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
 
 def validation_step(state: train_state.TrainState, validation_data: List[Dict[str, Any]],
                    goal_model: Optional[GoalInferenceNetwork], goal_trained_state: Optional[train_state.TrainState],
-                   batch_size: int = 32, ego_agent_id: int = 0, use_true_goals: bool = False) -> Tuple[float, float, float, List[jnp.ndarray]]:
+                   batch_size: int = 32, ego_agent_id: int = 0, use_true_goals: bool = False) -> Tuple[float, float, float, float, List[jnp.ndarray]]:
     """
     Perform validation on the validation dataset.
     
@@ -1296,9 +1296,10 @@ def validation_step(state: train_state.TrainState, validation_data: List[Dict[st
         ego_agent_id: ID of the ego agent
         
     Returns:
-        Tuple of (average validation loss, average sparsity loss, average similarity loss, list of predicted masks)
+        Tuple of (average validation loss, average binary loss, average sparsity loss, average similarity loss, list of predicted masks)
     """
     val_losses = []
+    val_binary_losses = []
     val_sparsity_losses = []
     val_similarity_losses = []
     all_predicted_masks = []
@@ -1341,14 +1342,16 @@ def validation_step(state: train_state.TrainState, validation_data: List[Dict[st
                                   sigma1, sigma2)  # Same loss function as training
 
         val_losses.append(float(total_loss_val))
+        val_binary_losses.append(float(binary_loss_val))
         val_sparsity_losses.append(float(sparsity_loss_val))
         val_similarity_losses.append(float(similarity_loss_val))
     
     avg_val_loss = sum(val_losses) / len(val_losses)
+    avg_val_binary = sum(val_binary_losses) / len(val_binary_losses)
     avg_val_sparsity = sum(val_sparsity_losses) / len(val_sparsity_losses)
     avg_val_similarity = sum(val_similarity_losses) / len(val_similarity_losses)
 
-    return avg_val_loss, avg_val_sparsity, avg_val_similarity, all_predicted_masks
+    return avg_val_loss, avg_val_binary, avg_val_sparsity, avg_val_similarity, all_predicted_masks
 
 # ============================================================================
 # DEBUG FUNCTIONS
@@ -1436,7 +1439,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
                                    goal_trained_state: Optional[train_state.TrainState],
                                    num_epochs: int = 30, learning_rate: float = 1e-3,
                                    sigma1: float = 0.1, sigma2: float = 0.0, batch_size: int = 32, 
-                                   use_true_goals: bool = False, rng: jnp.ndarray = None) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], train_state.TrainState, str, float, int]:
+                                   use_true_goals: bool = False, rng: jnp.ndarray = None) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float], List[float], train_state.TrainState, str, float, int]:
     """Train PSN using pretrained goal inference network with validation."""
     if rng is None:
         rng = jax.random.PRNGKey(config.training.seed)
@@ -1492,8 +1495,10 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
     training_losses = []
     validation_losses = []
     # Track individual loss components over epochs
+    binary_losses = []
     sparsity_losses = []
     similarity_losses = []
+    validation_binary_losses = []
     validation_sparsity_losses = []
     validation_similarity_losses = []
     best_loss = float('inf')
@@ -1520,6 +1525,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         current_sigma1 = sigma1
         
         epoch_losses = []
+        epoch_binary_losses = []
         epoch_sparsity_losses = []
         epoch_similarity_losses = []
         # Create batches
@@ -1560,6 +1566,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
                 goal_model, goal_trained_state, current_sigma1, sigma2, use_true_goals, step_key, similarity_pbar)
             
             epoch_losses.append(float(loss))
+            epoch_binary_losses.append(float(binary_loss_val))
             epoch_sparsity_losses.append(float(sparsity_loss_val))
             epoch_similarity_losses.append(float(similarity_loss_val))
             
@@ -1588,17 +1595,20 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         batch_pbar.close()
         
         # Perform validation
-        val_loss, val_sparsity_loss, val_similarity_loss, val_masks = validation_step(
+        val_loss, val_binary_loss, val_sparsity_loss, val_similarity_loss, val_masks = validation_step(
             state, validation_data, goal_model, goal_trained_state, batch_size, ego_agent_id=ego_agent_id, use_true_goals=use_true_goals)
         validation_losses.append(val_loss)
+        validation_binary_losses.append(val_binary_loss)
         validation_sparsity_losses.append(val_sparsity_loss)
         validation_similarity_losses.append(val_similarity_loss)
         
         # Calculate average loss for the epoch
         avg_loss = sum(epoch_losses) / len(epoch_losses)
+        avg_binary_loss = sum(epoch_binary_losses) / len(epoch_binary_losses)
         avg_sparsity_loss = sum(epoch_sparsity_losses) / len(epoch_sparsity_losses)
         avg_similarity_loss = sum(epoch_similarity_losses) / len(epoch_similarity_losses)
         training_losses.append(avg_loss)
+        binary_losses.append(avg_binary_loss)
         sparsity_losses.append(avg_sparsity_loss)
         similarity_losses.append(avg_similarity_loss)
         
@@ -1615,6 +1625,14 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
             print(f"\nNew best model found at epoch {epoch + 1} with validation loss: {best_loss:.4f} (σ1: {current_sigma1:.3f})")
             print(f"Best model saved to: {best_model_path}")
         
+        # Save model every 20 epochs
+        if (epoch + 1) % 20 == 0:
+            checkpoint_path = os.path.join(log_dir, f"psn_checkpoint_epoch_{epoch + 1}.pkl")
+            model_bytes = flax.serialization.to_bytes(state)
+            with open(checkpoint_path, 'wb') as f:
+                pickle.dump(model_bytes, f)
+            print(f"Checkpoint saved at epoch {epoch + 1}: {checkpoint_path}")
+        
         # Update main progress bar
         training_pbar.set_postfix({
             'Epoch': f'{epoch+1}/{num_epochs}',
@@ -1627,8 +1645,10 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         writer.add_scalar('Loss/Epoch/Training', avg_loss, epoch)
         writer.add_scalar('Loss/Epoch/Validation', val_loss, epoch)
         writer.add_scalar('Loss/Epoch/Best', best_loss, epoch)
+        writer.add_scalar('Loss/Epoch/Binary', avg_binary_loss, epoch)
         writer.add_scalar('Loss/Epoch/Sparsity', avg_sparsity_loss, epoch)
         writer.add_scalar('Loss/Epoch/Similarity', avg_similarity_loss, epoch)
+        writer.add_scalar('Loss/Epoch/Validation_Binary', val_binary_loss, epoch)
         writer.add_scalar('Loss/Epoch/Validation_Sparsity', val_sparsity_loss, epoch)
         writer.add_scalar('Loss/Epoch/Validation_Similarity', val_similarity_loss, epoch)
         writer.add_scalar('Hyperparameters/Sigma1', current_sigma1, epoch)
@@ -1670,7 +1690,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
     
     print(f"\nTraining completed! Best model found at epoch {best_epoch + 1} with loss: {best_loss:.4f}")
     
-    return training_losses, validation_losses, sparsity_losses, similarity_losses, validation_sparsity_losses, validation_similarity_losses, state, log_dir, best_loss, best_epoch
+    return training_losses, validation_losses, binary_losses, sparsity_losses, similarity_losses, validation_binary_losses, validation_sparsity_losses, validation_similarity_losses, state, log_dir, best_loss, best_epoch
 
 # ============================================================================
 # MODEL LOADING UTILITIES
@@ -1744,7 +1764,7 @@ if __name__ == "__main__":
     psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims)
     
     # Train PSN with appropriate goal source
-    training_losses, validation_losses, sparsity_losses, similarity_losses, validation_sparsity_losses, validation_similarity_losses, trained_state, log_dir, best_loss, best_epoch = train_psn_with_pretrained_goals(
+    training_losses, validation_losses, binary_losses, sparsity_losses, similarity_losses, validation_binary_losses, validation_sparsity_losses, validation_similarity_losses, trained_state, log_dir, best_loss, best_epoch = train_psn_with_pretrained_goals(
         psn_model, training_data, validation_data, goal_model, goal_trained_state,
         num_epochs=num_epochs, learning_rate=learning_rate,
         sigma1=sigma1, sigma2=sigma2, batch_size=batch_size,

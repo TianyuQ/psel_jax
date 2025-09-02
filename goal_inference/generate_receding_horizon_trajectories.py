@@ -65,14 +65,6 @@ ego_agent_id = config.game.ego_agent_id
 num_iters = config.optimization.num_iters
 step_size = config.optimization.step_size
 
-print(f"Configuration loaded:")
-print(f"  N agents: {n_agents}")
-print(f"  Planning horizon: {T_receding_horizon_planning} steps per game")
-print(f"  Total receding horizon iterations: {T_receding_horizon_iterations} steps")
-print(f"  dt: {dt}")
-print(f"  Optimization: {num_iters} iters, step size: {step_size}")
-
-
 # ============================================================================
 # AGENT DEFINITIONS
 # ============================================================================
@@ -374,11 +366,7 @@ def generate_receding_horizon_trajectory(agents: list,
     # Current states (start with initial states)
     current_states = [state.copy() for state in initial_states]
     
-    print(f"  Solving receding horizon games for {T_receding_horizon_iterations} iterations...")
-    
     for step in range(T_receding_horizon_iterations):
-        if step % 10 == 0:
-            print(f"    Iteration {step + 1}/{T_receding_horizon_iterations}")
         
         # Solve the current T_planning-horizon game from current states
         # This solves a game looking ahead T_planning steps (e.g., 50 steps)
@@ -579,7 +567,7 @@ def load_reference_trajectory_sample(sample_id: int, reference_dir: str) -> tupl
 
 
 def generate_receding_horizon_trajectories(num_samples: int, 
-                                         save_dir: str = "receding_horizon_trajectories_4p") -> List[Dict[str, Any]]:
+                                         save_dir: str = None) -> List[Dict[str, Any]]:
     """
     Generate receding horizon trajectories by solving receding horizon games.
     
@@ -592,12 +580,17 @@ def generate_receding_horizon_trajectories(num_samples: int,
     """
     all_samples = []
     
+    # Set default save directory based on number of agents if not provided
+    if save_dir is None:
+        save_dir = config.testing.data_dir
+    
     # Create save directory
     save_path = Path(save_dir)
     save_path.mkdir(exist_ok=True)
     
     print(f"Generating {num_samples} receding horizon trajectory samples...")
     print(f"Game parameters: N={n_agents}, Planning horizon={T_receding_horizon_planning}, Total iterations={T_receding_horizon_iterations}, dt={dt}")
+    print(f"Optimization parameters: num_iters={num_iters}, step_size={step_size}")
     print(f"Saving to directory: {save_path}")
     print("=" * 80)
     
@@ -609,7 +602,9 @@ def generate_receding_horizon_trajectories(num_samples: int,
         
         try:
             # Load reference trajectory sample to get initial positions and target positions
-            init_positions, target_positions, boundary_size = load_reference_trajectory_sample(sample_id, "reference_trajectories_4p")
+            # Use training data directory to load reference trajectories for generation  
+            reference_dir = config.training.data_dir
+            init_positions, target_positions, boundary_size = load_reference_trajectory_sample(sample_id, reference_dir)
             
             # Convert to initial states (add zero velocities)
             initial_states = []
@@ -648,11 +643,6 @@ def generate_receding_horizon_trajectories(num_samples: int,
             plot_path = save_path / plot_filename
             boundary_size = get_boundary_size(n_agents)
             plot_receding_horizon_sample(sample_data, boundary_size, str(plot_path))
-            
-            elapsed_time = time.time() - start_time
-            if sample_id % 10 == 0 or sample_id < 5:  # Report timing for first few and every 10th
-                print(f"  ✓ Completed in {elapsed_time:.2f}s (Total game solving: {total_time:.2f}s)")
-                print(f"  ✓ Saved: {json_filename}, {plot_filename}")
         
         except Exception as e:
             print(f"  ✗ Error generating sample {sample_id}: {str(e)}")
@@ -677,10 +667,7 @@ if __name__ == "__main__":
     num_samples = config.reference_generation.num_samples
     
     # Generate receding horizon trajectories
-    all_samples = generate_receding_horizon_trajectories(
-        num_samples, 
-        save_dir="receding_horizon_trajectories_4p"
-    )
+    all_samples = generate_receding_horizon_trajectories(num_samples)
     
     print("\nReceding horizon trajectory generation completed!")
     print(f"Generated {len(all_samples)} samples with {n_agents} agents each.")

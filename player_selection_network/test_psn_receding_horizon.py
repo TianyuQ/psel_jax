@@ -351,23 +351,72 @@ def solve_receding_horizon_game(agents: list,
     return first_controls, state_trajectories, total_time
 
 
-def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
-    """Extract observation trajectory for goal inference."""
-    obs_traj = []
-    for step in range(T_observation):
-        step_states = []
-        for agent_idx in range(n_agents):
-            agent_key = f"agent_{agent_idx}"
-            agent_states = sample_data["trajectories"][agent_key]["states"]
-            if step < len(agent_states):
-                step_states.append(agent_states[step])
-            else:
-                # If trajectory is too short, use last state
-                last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
-                step_states.append(last_state)
-        obs_traj.append(step_states)
+def normalize_sample_data(sample_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize sample data structure to ensure consistent access.
     
-    return jnp.array(obs_traj)
+    Handles both reference trajectory files (with "trajectories" key) and 
+    receding horizon files (with "receding_horizon_trajectories" key).
+    """
+    normalized_data = sample_data.copy()
+    
+    # Check if this is a receding horizon file
+    if "receding_horizon_trajectories" in sample_data and "trajectories" not in sample_data:
+        # Convert receding horizon format to standard format
+        normalized_data["trajectories"] = {}
+        
+        for agent_key, agent_data in sample_data["receding_horizon_trajectories"].items():
+            # Use the actual executed states (50 steps) from receding horizon simulation
+            if "states" in agent_data:
+                # Use the actual executed receding horizon states (50 steps)
+                normalized_data["trajectories"][agent_key] = {"states": agent_data["states"]}
+            elif "full_trajectories" in agent_data and len(agent_data["full_trajectories"]) > 0:
+                # Fallback: if no states field, use first trajectory (15 steps)
+                first_trajectory = agent_data["full_trajectories"][0]
+                normalized_data["trajectories"][agent_key] = {"states": first_trajectory}
+            else:
+                # Fallback: create dummy states
+                normalized_data["trajectories"][agent_key] = {"states": [[0.0, 0.0, 0.0, 0.0] for _ in range(T_total)]}
+    
+    return normalized_data
+
+
+def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
+    """
+    Extract observation trajectory (first 10 steps) for all agents.
+    This matches the format used in goal inference training.
+    
+    Args:
+        sample_data: Reference trajectory sample
+        
+    Returns:
+        observation_trajectory: Observation trajectory (T_observation, N_agents, state_dim)
+    """
+    # Normalize data structure first
+    normalized_data = normalize_sample_data(sample_data)
+    
+    # Initialize array to store all agent states
+    # Shape: (T_observation, N_agents, state_dim)
+    observation_trajectory = jnp.zeros((T_observation, n_agents, 4))  # state_dim = 4
+    
+    for i in range(n_agents):
+        agent_key = f"agent_{i}"
+        agent_states = normalized_data["trajectories"][agent_key]["states"]
+        # Take first T_observation steps
+        if len(agent_states) >= T_observation:
+            agent_states_array = jnp.array(agent_states[:T_observation])  # (T_observation, state_dim)
+        else:
+            # Pad with last state if trajectory is too short
+            agent_states_padded = agent_states[:]
+            last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
+            while len(agent_states_padded) < T_observation:
+                agent_states_padded.append(last_state)
+            agent_states_array = jnp.array(agent_states_padded[:T_observation])
+        
+        # Place in the correct position: (T_observation, N_agents, state_dim)
+        observation_trajectory = observation_trajectory.at[:, i, :].set(agent_states_array)
+    
+    return observation_trajectory
 
 
 def extract_reference_goals(sample_data: Dict[str, Any]) -> jnp.ndarray:
@@ -380,7 +429,7 @@ def extract_reference_goals(sample_data: Dict[str, Any]) -> jnp.ndarray:
         goals = []
         for agent_idx in range(n_agents):
             agent_key = f"agent_{agent_idx}"
-            agent_states = sample_data["trajectories"][agent_key]["states"]
+            agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
             if len(agent_states) > 0:
                 # Use the final position as the goal
                 final_state = agent_states[-1]
@@ -401,7 +450,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     Test receding horizon planning with goal inference and player selection models.
     
     Args:
-        sample_data: Reference trajectory sample data
+        sample_data: Reference trajectory sample data (will be normalized)
         psn_model: Trained PSN model
         psn_trained_state: Trained PSN model state
         goal_model: Trained goal inference model
@@ -412,10 +461,15 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     """
     print(f"    Testing receding horizon planning with models on sample {sample_data['sample_id']}")
     
+    # Normalize sample data to handle different formats
+    normalized_sample_data = normalize_sample_data(sample_data)
+    
     # Initialize results storage
     results = {
         'sample_id': sample_data['sample_id'],
         'ego_agent_id': ego_agent_id,
+        'goal_source': config.testing.receding_horizon.goal_source,
+        'goal_inference_input_method': getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps') if config.testing.receding_horizon.goal_source == "goal_inference" else None,
         'T_observation': T_observation,
         'T_total': T_total,
         'T_receding_horizon_planning': T_receding_horizon_planning,
@@ -441,7 +495,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         # Add ground truth states for all agents
         for agent_idx in range(n_agents):
             agent_key = f"agent_{agent_idx}"
-            agent_states = sample_data["trajectories"][agent_key]["states"]
+            agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
             
             if step < len(agent_states):
                 current_state = agent_states[step]
@@ -468,7 +522,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             current_states.append(jnp.array(agent_states[-1]))
         else:
             # Fallback
-            sample_states = sample_data["trajectories"][agent_key]["states"]
+            sample_states = normalized_sample_data["trajectories"][agent_key]["states"]
             current_states.append(jnp.array(sample_states[T_observation - 1] if len(sample_states) >= T_observation else sample_states[-1]))
     
     # Main receding horizon loop
@@ -476,7 +530,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         # Decide whether to use models or default values based on iteration
         if iteration < config.testing.receding_horizon.initial_stabilization_iterations:
             # First N iterations: Use ground truth goals and all agents (mask = 1)
-            predicted_goals = extract_reference_goals(sample_data)
+            predicted_goals = extract_reference_goals(normalized_sample_data)
             predicted_mask = jnp.ones(n_agents - 1)  # All 1s for mask (no selection)
             num_selected = n_agents - 1  # All other agents selected
             mask_sparsity = 0.0  # No sparsity
@@ -484,43 +538,105 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         else:
             # After N iterations: Use goal inference and player selection models (threshold: {config.testing.receding_horizon.mask_threshold})
             
-            # PSN was trained with true goals, so we should use true goals for testing to match training
-            goal_source = "true_goals"
-            # print(f"        PSN was trained with true goals, using true goals for testing (matching training)")
+            # Use goal source configuration to decide between true goals and goal inference
+            goal_source = config.testing.receding_horizon.goal_source
             
             if goal_source == "true_goals":
-                # Use true goals (same as PSN training)
-                predicted_goals = extract_reference_goals(sample_data)
-                # print(f"        Using true goals for testing (matching PSN training)")
-            else:
-                # Use goal inference model (same as PSN training)
-                goal_obs_traj = extract_observation_trajectory(sample_data)
+                # Use true goals for PSN testing
+                predicted_goals = extract_reference_goals(normalized_sample_data)
+            elif goal_source == "goal_inference":
+                # Check input method for goal inference
+                input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
+                
+                if input_method == "first_steps":
+                    # Use first T_observation steps from the original ground truth trajectory
+                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
+                    
+                elif input_method == "sliding_window":
+                    # Use sliding window: latest T_observation steps from current game state
+                    current_total_steps = T_observation + iteration
+                    obs_start_step = max(0, current_total_steps - T_observation)  # Start of observation window
+                    
+                    # Build sliding window observation trajectory (same as PSN input construction)
+                    goal_obs_traj = []
+                    for obs_step in range(T_observation):
+                        actual_step = obs_start_step + obs_step
+                        step_states = []
+                        
+                        for agent_idx in range(n_agents):
+                            agent_key = f"agent_{agent_idx}"
+                            if agent_idx == 0:  # Ego agent: use computed accumulated trajectory
+                                agent_states = current_game_state["trajectories"][agent_key]["states"]
+                                if actual_step < len(agent_states):
+                                    step_states.append(agent_states[actual_step])
+                                else:
+                                    # Use last available state if beyond current trajectory
+                                    last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
+                                    step_states.append(last_state)
+                            else:  # Other agents: use ground truth receding horizon trajectory
+                                agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
+                                if actual_step < len(agent_states):
+                                    step_states.append(agent_states[actual_step])
+                                else:
+                                    # Use last state if trajectory is too short
+                                    last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
+                                    step_states.append(last_state)
+                        
+                        goal_obs_traj.append(step_states)
+                    
+                    # Convert to array format
+                    goal_obs_traj = jnp.array(goal_obs_traj)  # (T_observation, N_agents, state_dim)
+                    
+                else:
+                    raise ValueError(f"Invalid goal_inference_input_method: {input_method}. Must be 'first_steps' or 'sliding_window'")
+                
+                # Convert to input format for goal inference model
                 goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
                 predicted_goals = goal_model.apply({'params': goal_trained_state['params']}, goal_obs_input, deterministic=True)
                 predicted_goals = predicted_goals[0].reshape(n_agents, 2)
-                # print(f"        Using goal inference model for testing (matching PSN training)")
+            else:
+                raise ValueError(f"Invalid goal_source: {goal_source}. Must be 'true_goals' or 'goal_inference'")
             
             # Get true goals for comparison
-            true_goals = extract_reference_goals(sample_data)
+            true_goals = extract_reference_goals(normalized_sample_data)
             
             # Step 2: Infer player selection using current observation
-            # Construct observation trajectory in the correct format (T_observation, n_agents, state_dim)
+            # Construct observation trajectory using LATEST 10 steps (sliding window)
+            # Current total accumulated steps: T_observation + iteration
+            current_total_steps = T_observation + iteration
+            
+            # Get the latest T_observation steps for PSN input
+            obs_start_step = max(0, current_total_steps - T_observation)  # Start of observation window
+            obs_end_step = current_total_steps  # End of observation window (exclusive)
+            
+            # PSN uses sliding window: latest T_observation steps
+            # - Ego agent (0): accumulated computed trajectory from receding horizon solver
+            # - Other agents: ground truth receding horizon trajectory
+            
             obs_traj = []
-            for step in range(T_observation):
+            for obs_step in range(T_observation):
+                actual_step = obs_start_step + obs_step
                 step_states = []
+                
                 for agent_idx in range(n_agents):
                     agent_key = f"agent_{agent_idx}"
                     if agent_idx == 0:  # Ego agent: use computed accumulated trajectory
                         agent_states = current_game_state["trajectories"][agent_key]["states"]
-                    else:  # Other agents: use ground truth trajectory from reference
-                        agent_states = sample_data["trajectories"][agent_key]["states"]
-                    
-                    if step < len(agent_states):
-                        step_states.append(agent_states[step])
-                    else:
-                        # If trajectory is too short, use last state
-                        last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
-                        step_states.append(last_state)
+                        if actual_step < len(agent_states):
+                            step_states.append(agent_states[actual_step])
+                        else:
+                            # Use last available state if beyond current trajectory
+                            last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
+                            step_states.append(last_state)
+                    else:  # Other agents: use ground truth receding horizon trajectory
+                        agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
+                        if actual_step < len(agent_states):
+                            step_states.append(agent_states[actual_step])
+                        else:
+                            # Use last state if trajectory is too short
+                            last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
+                            step_states.append(last_state)
+                
                 obs_traj.append(step_states)
             
             # Convert to array and reshape to (1, T_observation, n_agents, state_dim)
@@ -634,11 +750,11 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             else:  # Other agents: use reference receding horizon trajectory
                 # Get the reference trajectory for this agent at this step
                 ref_step = T_observation + iteration
-                if ref_step < len(sample_data["trajectories"][f"agent_{i}"]["states"]):
-                    ref_state = sample_data["trajectories"][f"agent_{i}"]["states"][ref_step]
+                if ref_step < len(normalized_sample_data["trajectories"][f"agent_{i}"]["states"]):
+                    ref_state = normalized_sample_data["trajectories"][f"agent_{i}"]["states"][ref_step]
                 else:
                     # If reference trajectory is too short, use last state
-                    ref_state = sample_data["trajectories"][f"agent_{i}"]["states"][-1]
+                    ref_state = normalized_sample_data["trajectories"][f"agent_{i}"]["states"][-1]
                 
                 # Update current state for next iteration
                 current_states[i] = jnp.array(ref_state)
@@ -683,6 +799,9 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     print(f"    ✓ Mask Sparsity: {results['mask_sparsity']:.2f}")
     print(f"    ✓ Selected Agents: {results['num_selected_agents']:.1f}")
     
+    # Store normalized data for GIF creation
+    results['normalized_sample_data'] = normalized_sample_data
+    
     return results
 
 
@@ -703,7 +822,8 @@ def save_test_results(results: Dict[str, Any], save_dir: str) -> str:
 def create_receding_horizon_gif(sample_data: Dict[str, Any], 
                                 results: Dict[str, Any], 
                                 sample_id: int, 
-                                save_dir: str) -> str:
+                                save_dir: str,
+                                normalized_sample_data: Dict[str, Any] = None) -> str:
     """
     Create a GIF visualization of the receding horizon trajectory evolution.
     
@@ -712,6 +832,7 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
         results: Test results containing receding horizon data
         sample_id: Sample identifier
         save_dir: Directory to save the GIF
+        normalized_sample_data: Normalized sample data (if None, will normalize sample_data)
     
     Returns:
         Path to the saved GIF file
@@ -726,6 +847,10 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
     if not game_state.get('trajectories'):
         print(f"      Warning: Empty game state for sample {sample_id}")
         return ""
+    
+    # Use normalized data if provided, otherwise normalize the sample data
+    if normalized_sample_data is None:
+        normalized_sample_data = normalize_sample_data(sample_data)
     
     # Create frames for the GIF showing all trajectory steps
     frames = []
@@ -744,8 +869,8 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
         # Create frame for this step
         fig, ax = plt.subplots(1, 1, figsize=(12, 10))
         ax.set_aspect('equal')
-        ax.set_xlim(-3, 3)
-        ax.set_ylim(-3, 3)
+        ax.set_xlim(-3.5, 3.5)
+        ax.set_ylim(-3.5, 3.5)
         
         # Title with step information
         if step < T_observation:
@@ -772,7 +897,7 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
             if actual_step >= 0:
                 if i == 0:  # Ego agent - plot both ground truth and computed trajectories
                     # Plot ground truth trajectory (black dashed)
-                    sample_agent_states = sample_data["trajectories"][agent_key]["states"]
+                    sample_agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
                     if len(sample_agent_states) > 0:
                         sample_traj = np.array(sample_agent_states[:T_total])
                         ax.plot(sample_traj[:, 0], sample_traj[:, 1], '--', 
@@ -795,7 +920,7 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
                                    max(ax.get_ylim()[1], all_y.max() + 0.1))
                 else:  # Other agents - show ground truth trajectories (not from solver)
                     # Plot ground truth trajectory from sample data
-                    sample_agent_states = sample_data["trajectories"][agent_key]["states"]
+                    sample_agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
                     if len(sample_agent_states) > 0:
                         sample_traj = np.array(sample_agent_states[:T_total])
                         ax.plot(sample_traj[:, 0], sample_traj[:, 1], '-', 
@@ -839,7 +964,6 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
                         ax.text(current_pos[0] + 0.1, current_pos[1] + 0.1, f'{i}*', 
                                 fontsize=12, ha='left', va='bottom', 
                                 bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-                        print(f"        Step {step}, Agent {i}: Plotting RED (selected)")
                     else:
                         ax.plot(current_pos[0], current_pos[1], 'o', 
                                  color=other_agent_color, markersize=8, alpha=0.7)
@@ -848,7 +972,7 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
                                 fontsize=12, ha='left', va='bottom', 
                                 bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
         # Plot goals and goal predictions
-        true_goals = extract_reference_goals(sample_data)
+        true_goals = extract_reference_goals(normalized_sample_data)
         
         # Plot true goals
         for j in range(n_agents):
@@ -935,9 +1059,20 @@ def run_receding_horizon_testing(psn_model_path: str,
     print("RECEDING HORIZON TESTING WITH GOAL INFERENCE AND PLAYER SELECTION MODELS")
     print("=" * 80)
     
-    # Determine output directory
+    # Determine output directory based on goal source and input method if not provided
     if output_dir is None:
-        output_dir = "receding_horizon_test_results"
+        goal_source = config.testing.receding_horizon.goal_source
+        if goal_source == "true_goals":
+            output_dir = "receding_horizon_results_goal_true"
+        elif goal_source == "goal_inference":
+            # Check input method for goal inference
+            input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
+            if input_method == "sliding_window":
+                output_dir = "receding_horizon_results_goal_inference_sliding_window"
+            else:  # first_steps
+                output_dir = "receding_horizon_results_goal_inference"
+        else:
+            output_dir = "receding_horizon_test_results"
     
     # Load models
     print(f"Loading trained models...")
@@ -950,12 +1085,12 @@ def run_receding_horizon_testing(psn_model_path: str,
     print(f"Loading reference data from: {reference_file}")
     import glob
     
-    # Find all ref_traj_sample_*.json files in the directory
-    pattern = os.path.join(reference_file, "ref_traj_sample_*.json")
+    # Find all receding_horizon_sample_*.json files in the directory
+    pattern = os.path.join(reference_file, "receding_horizon_sample_*.json")
     json_files = sorted(glob.glob(pattern))
     
     if not json_files:
-        raise FileNotFoundError(f"No ref_traj_sample_*.json files found in directory: {reference_file}")
+        raise FileNotFoundError(f"No receding_horizon_sample_*.json files found in directory: {reference_file}")
     
     # Load samples
     reference_data = []
@@ -988,8 +1123,8 @@ def run_receding_horizon_testing(psn_model_path: str,
             filepath = save_test_results(results, output_dir)
             print(f"  ✓ Results saved to: {filepath}")
             
-            # Create trajectory visualization GIF
-            gif_path = create_receding_horizon_gif(sample_data, results, sample_data['sample_id'], output_dir)
+            # Create trajectory visualization GIF  
+            gif_path = create_receding_horizon_gif(sample_data, results, sample_data['sample_id'], output_dir, results.get('normalized_sample_data'))
             if gif_path:
                 print(f"  ✓ GIF visualization created: {gif_path}")
             
@@ -1034,7 +1169,7 @@ if __name__ == "__main__":
     psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/psn_gru_true_goals_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
     
     # Goal inference model from goal_inference_gru_xxx directory
-    goal_model_path = f"log/goal_inference_gru_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_best_model.pkl"
+    goal_model_path = f"log/goal_inference_rh_gru_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_rh_best_model.pkl"
     
     # Check if models exist
     if psn_model_path is None or not os.path.exists(psn_model_path):
@@ -1047,17 +1182,35 @@ if __name__ == "__main__":
         print("Please train a goal inference model first using: python3 goal_inference/pretrain_goal_inference.py")
         exit(1)
     
-    reference_file = config.paths.reference_data_dir
+    # Use PSN-specific testing data directory (receding horizon trajectories)
+    reference_file = config.testing.psn_data_dir
     
-    # Create output directory under the PSN model directory
+    # Create output directory under the PSN model directory based on goal source and input method
     psn_model_dir = os.path.dirname(psn_model_path)
-    output_dir = os.path.join(psn_model_dir, config.testing.receding_horizon.output_dir)
+    goal_source = config.testing.receding_horizon.goal_source
+    
+    if goal_source == "true_goals":
+        output_dir = os.path.join(psn_model_dir, "receding_horizon_results_goal_true")
+    elif goal_source == "goal_inference":
+        # Check input method for goal inference
+        input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
+        if input_method == "sliding_window":
+            output_dir = os.path.join(psn_model_dir, "receding_horizon_results_goal_inference_sliding_window")
+        else:  # first_steps
+            output_dir = os.path.join(psn_model_dir, "receding_horizon_results_goal_inference")
+    else:
+        # Fallback to original directory name
+        output_dir = os.path.join(psn_model_dir, config.testing.receding_horizon.output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Using models:")
     print(f"  PSN Model: {psn_model_path}")
     print(f"  Goal Model: {goal_model_path}")
     print(f"  Reference Data: {reference_file}")
+    print(f"  Goal Source: {goal_source}")
+    if goal_source == "goal_inference":
+        input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
+        print(f"  Goal Inference Input Method: {input_method}")
     print(f"  Results will be saved to: {output_dir}")
     
     # Run testing
@@ -1079,6 +1232,10 @@ if __name__ == "__main__":
         f.write(f"  - PSN Model: {psn_model_path}\n")
         f.write(f"  - Reference Data: {reference_file}\n\n")
         f.write("Test Configuration:\n")
+        f.write(f"  - Goal source: {config.testing.receding_horizon.goal_source}\n")
+        if config.testing.receding_horizon.goal_source == "goal_inference":
+            input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
+            f.write(f"  - Goal inference input method: {input_method}\n")
         f.write(f"  - Number of samples: {config.testing.receding_horizon.num_samples}\n")
         f.write(f"  - Receding horizon iterations: {T_receding_horizon_iterations}\n")
         f.write(f"  - Planning horizon per game: {T_receding_horizon_planning}\n")
