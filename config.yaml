@@ -34,7 +34,7 @@ game:
   T_observation: 10         # Number of steps to observe before solving the game
 
   # Agent configuration
-  N_agents: 4               # Total number of agents in the game
+  N_agents: 10               # Total number of agents in the game
   ego_agent_id: 0           # ID of the ego agent (usually 0)
   
   # State and control dimensions
@@ -100,7 +100,7 @@ goal_inference:
   regularization_weight: 0.001  # L2 regularization weight
   
   # Finetuning configuration
-  finetune_with_game_solving: true  # Enable finetuning with receding horizon game solving
+  finetune_with_game_solving: false  # Enable finetuning with receding horizon game solving
   finetune_start_epoch_ratio: 0.8   # Start finetuning at 50% of total epochs
   finetune_learning_rate: 0.001    # Reduced learning rate for finetuning
   similarity_loss_weight: 1.0       # Weight for similarity loss vs prediction loss
@@ -109,6 +109,11 @@ goal_inference:
   
   # Data parameters
   observation_length: 10    # Length of observation history (K_observation)
+  
+  # Observation input options
+  obs_input_type: "partial"    # Observation input type ["full", "partial"]
+  # - "full": Use full state (x, y, vx, vy) - 4 dimensions per agent
+  # - "partial": Use position only (x, y) - 2 dimensions per agent
   
   # Early stopping
   patience: 50              # Patience for early stopping
@@ -135,7 +140,7 @@ psn:
   
   # Loss function weights
   sigma1: 0.075              # Weight for mask sparsity loss
-  sigma2: 0.05               # Weight for mask diversity loss
+  sigma2: 0.075               # Weight for mask diversity loss
   
   # Goal source configuration
   # IMPORTANT: This setting affects testing behavior:
@@ -143,6 +148,11 @@ psn:
   # - If false: PSN training uses goal inference model, testing should also use goal inference model
   # The testing script will automatically detect this setting to ensure consistency
   use_true_goals: true     # Whether to use true goals instead of predicted goals from goal inference model
+  
+  # Observation input options
+  obs_input_type: "partial"    # Observation input type ["full", "partial"]
+  # - "full": Use full state (x, y, vx, vy) - 4 dimensions per agent
+  # - "partial": Use position only (x, y) - 2 dimensions per agent
   
   # Mask parameters
   mask_threshold: 0.5       # Threshold for converting continuous to binary mask

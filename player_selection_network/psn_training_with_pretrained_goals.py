@@ -181,27 +181,45 @@ else:
 # Import GoalInferenceNetwork from the goal inference module
 from goal_inference.pretrain_goal_inference import GoalInferenceNetwork
 
-def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
+def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: str = "full") -> jnp.ndarray:
     """
     Extract observation trajectory (first 10 steps) for all agents.
     
     Args:
         sample_data: Reference trajectory sample
+        obs_input_type: Observation input type ["full", "partial"]
         
     Returns:
-        observation_trajectory: Observation trajectory (T_observation, N_agents, state_dim)
+        observation_trajectory: Observation trajectory 
+            - If obs_input_type="full": (T_observation, N_agents, 4)
+            - If obs_input_type="partial": (T_observation, N_agents, 2)
     """
+    # Determine output dimensions based on observation type
+    if obs_input_type == "partial":
+        output_dim = 2  # Only position (x, y)
+    else:  # "full"
+        output_dim = 4  # Full state (x, y, vx, vy)
+    
     # Initialize array to store all agent states
-    # Shape: (T_observation, N_agents, state_dim)
-    observation_trajectory = jnp.zeros((T_observation, N_agents, state_dim))
+    # Shape: (T_observation, N_agents, output_dim)
+    observation_trajectory = jnp.zeros((T_observation, N_agents, output_dim))
     
     for i in range(N_agents):
         agent_key = f"agent_{i}"
         states = sample_data["trajectories"][agent_key]["states"]
         # Take first T_observation steps
         agent_states = jnp.array(states[:T_observation])  # (T_observation, state_dim)
-        # Place in the correct position: (T_observation, N_agents, state_dim)
-        observation_trajectory = observation_trajectory.at[:, i, :].set(agent_states)
+        
+        # Extract relevant dimensions based on observation type
+        if obs_input_type == "partial":
+            # Only use position (x, y) - first 2 dimensions
+            agent_obs = agent_states[:, :2]  # (T_observation, 2)
+        else:  # "full"
+            # Use full state (x, y, vx, vy) - all 4 dimensions
+            agent_obs = agent_states[:, :4]  # (T_observation, 4)
+        
+        # Place in the correct position: (T_observation, N_agents, output_dim)
+        observation_trajectory = observation_trajectory.at[:, i, :].set(agent_obs)
     
     return observation_trajectory
 
@@ -212,7 +230,9 @@ class PlayerSelectionNetwork(nn.Module):
     """
     Player Selection Network (PSN) using GRU for temporal sequence processing.
     
-    Input: First 10 steps of all agents' trajectories (T_observation * N_agents * state_dim)
+    Input: First 10 steps of all agents' trajectories 
+        - If obs_input_type="full": (T_observation * N_agents * 4)
+        - If obs_input_type="partial": (T_observation * N_agents * 2)
     Output: Binary mask for selecting other agents (excluding ego agent)
     """
     
@@ -220,6 +240,7 @@ class PlayerSelectionNetwork(nn.Module):
     gru_hidden_size: int = 64
     dropout_rate: float = 0.3
     mask_output_dim: int = N_agents - 1  # Mask for other agents (excluding ego)
+    obs_input_type: str = "full"  # "full" or "partial"
     
     @nn.compact
     def __call__(self, x, deterministic: bool = False):
@@ -227,15 +248,23 @@ class PlayerSelectionNetwork(nn.Module):
         Forward pass of PSN.
         
         Args:
-            x: Input tensor of shape (batch_size, T_observation * N_agents * state_dim)
+            x: Input tensor 
+                - If obs_input_type="full": (batch_size, T_observation * N_agents * 4)
+                - If obs_input_type="partial": (batch_size, T_observation * N_agents * 2)
             deterministic: Whether to use deterministic mode (no dropout)
             
         Returns:
             mask: Binary mask of shape (batch_size, N_agents - 1)
         """
-        # Reshape input to (batch_size, T_observation, N_agents, state_dim)
+        # Determine input dimensions based on observation type
+        if self.obs_input_type == "partial":
+            input_dim = 2  # Only position (x, y)
+        else:  # "full"
+            input_dim = 4  # Full state (x, y, vx, vy)
+        
+        # Reshape input to (batch_size, T_observation, N_agents, input_dim)
         batch_size = x.shape[0]
-        x = x.reshape(batch_size, T_observation, N_agents, state_dim)
+        x = x.reshape(batch_size, T_observation, N_agents, input_dim)
         
         # Process each agent's trajectory through shared GRU
         agent_features = []
@@ -936,7 +965,8 @@ def compute_batch_similarity_loss(predicted_masks: jnp.ndarray,
                                   predicted_goals: jnp.ndarray,
                                   batch_data: List[Dict[str, Any]],
                                   ego_agent_id: int = 0,
-                                  similarity_pbar: tqdm = None) -> jnp.ndarray:
+                                  similarity_pbar: tqdm = None,
+                                  obs_input_type: str = "full") -> jnp.ndarray:
     """
     Compute similarity loss for a batch of samples by solving masked games.
     
@@ -957,7 +987,7 @@ def compute_batch_similarity_loss(predicted_masks: jnp.ndarray,
 
     # To force a JAX path, construct needed arrays from batch_data using helper
     # Extract observations and ref trajectories via existing helpers
-    observations, _, ref_trajs = prepare_batch_for_training(batch_data)
+    observations, _, ref_trajs = prepare_batch_for_training(batch_data, obs_input_type)
 
     def per_sample(i):
         mask = predicted_masks[i]
@@ -971,18 +1001,27 @@ def compute_batch_similarity_loss(predicted_masks: jnp.ndarray,
     losses = jax.vmap(per_sample)(jnp.arange(valid_bs))
     return jnp.mean(losses)
 
-def prepare_batch_for_training(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def prepare_batch_for_training(batch_data: List[Dict[str, Any]], obs_input_type: str = "full") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Prepare batch data for training.
     
     Args:
         batch_data: List of reference trajectory samples
+        obs_input_type: Observation input type ["full", "partial"]
         
     Returns:
-        observations: Batch of observations (batch_size, T_observation * N_agents * state_dim)
+        observations: Batch of observations 
+            - If obs_input_type="full": (batch_size, T_observation * N_agents * 4)
+            - If obs_input_type="partial": (batch_size, T_observation * N_agents * 2)
         masks: Batch of masks (batch_size, N_agents - 1)
         reference_trajectories: Batch of reference trajectories (batch_size, T_reference, state_dim)
     """
+    # Determine observation dimensions based on input type
+    if obs_input_type == "partial":
+        obs_dim = 2  # Only position (x, y)
+    else:  # "full"
+        obs_dim = 4  # Full state (x, y, vx, vy)
+    
     batch_obs = []
     batch_masks = []
     batch_ref_traj = []
@@ -991,7 +1030,7 @@ def prepare_batch_for_training(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.nd
         ego_agent_id = 0
         
         # Extract observation trajectory
-        obs_traj = extract_observation_trajectory(sample_data)
+        obs_traj = extract_observation_trajectory(sample_data, obs_input_type)
         batch_obs.append(obs_traj.flatten())
         
         # Extract ego reference trajectory
@@ -1015,7 +1054,7 @@ def prepare_batch_for_training(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.nd
     # Pad batch if necessary
     if len(batch_obs) < batch_size:
         pad_size = batch_size - len(batch_obs)
-        obs_pad = jnp.zeros((pad_size, T_observation * N_agents * state_dim))
+        obs_pad = jnp.zeros((pad_size, T_observation * N_agents * obs_dim))
         batch_obs.extend([obs_pad[i] for i in range(pad_size)])
         mask_pad = jnp.zeros((pad_size, N_agents - 1))
         batch_masks.extend([mask_pad[i] for i in range(pad_size)])
@@ -1029,19 +1068,28 @@ def prepare_batch_for_training(batch_data: List[Dict[str, Any]]) -> Tuple[jnp.nd
     
     return batch_obs, batch_masks, batch_ref_traj
 
-def prepare_batch_for_training_with_progress(batch_data: List[Dict[str, Any]], sample_pbar: tqdm) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+def prepare_batch_for_training_with_progress(batch_data: List[Dict[str, Any]], sample_pbar: tqdm, obs_input_type: str = "full") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Prepare batch data for training with a progress bar for samples.
     
     Args:
         batch_data: List of reference trajectory samples
         sample_pbar: tqdm progress bar for samples
+        obs_input_type: Observation input type ["full", "partial"]
         
     Returns:
-        observations: Batch of observations (batch_size, T_observation * N_agents * state_dim)
+        observations: Batch of observations 
+            - If obs_input_type="full": (batch_size, T_observation * N_agents * 4)
+            - If obs_input_type="partial": (batch_size, T_observation * N_agents * 2)
         masks: Batch of masks (batch_size, N_agents - 1)
         reference_trajectories: Batch of reference trajectories (batch_size, T_reference, state_dim)
     """
+    # Determine observation dimensions based on input type
+    if obs_input_type == "partial":
+        obs_dim = 2  # Only position (x, y)
+    else:  # "full"
+        obs_dim = 4  # Full state (x, y, vx, vy)
+    
     batch_obs = []
     batch_masks = []
     batch_ref_traj = []
@@ -1050,7 +1098,7 @@ def prepare_batch_for_training_with_progress(batch_data: List[Dict[str, Any]], s
         ego_agent_id = 0
         
         # Extract observation trajectory
-        obs_traj = extract_observation_trajectory(sample_data)
+        obs_traj = extract_observation_trajectory(sample_data, obs_input_type)
         batch_obs.append(obs_traj.flatten())
         
         # Extract ego reference trajectory
@@ -1077,7 +1125,7 @@ def prepare_batch_for_training_with_progress(batch_data: List[Dict[str, Any]], s
     # Pad batch if necessary
     if len(batch_obs) < batch_size:
         pad_size = batch_size - len(batch_obs)
-        obs_pad = jnp.zeros((pad_size, T_observation * N_agents * state_dim))
+        obs_pad = jnp.zeros((pad_size, T_observation * N_agents * obs_dim))
         batch_obs.extend([obs_pad[i] for i in range(pad_size)])
         mask_pad = jnp.zeros((pad_size, N_agents - 1))
         batch_masks.extend([mask_pad[i] for i in range(pad_size)])
@@ -1230,7 +1278,8 @@ def create_train_state(model: nn.Module, optimizer: optax.GradientTransformation
 def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
                batch_data: List[Dict[str, Any]], goal_model: Optional[GoalInferenceNetwork],
                goal_trained_state: Optional[train_state.TrainState], sigma1: float, sigma2: float,
-               use_true_goals: bool = False, rng: jnp.ndarray = None, similarity_pbar: tqdm = None) -> Tuple[train_state.TrainState, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+               use_true_goals: bool = False, rng: jnp.ndarray = None, similarity_pbar: tqdm = None,
+               obs_input_type: str = "full") -> Tuple[train_state.TrainState, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
     """
     Single training step with game-solving loss function.
     
@@ -1257,7 +1306,7 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
         sparsity_loss_val = mask_sparsity_loss(predicted_masks)
         
         # 3. Game-solving similarity loss: solve masked game and compute trajectory similarity
-        similarity_loss_val = compute_batch_similarity_loss(predicted_masks, predicted_goals, batch_data, similarity_pbar=similarity_pbar)
+        similarity_loss_val = compute_batch_similarity_loss(predicted_masks, predicted_goals, batch_data, similarity_pbar=similarity_pbar, obs_input_type=obs_input_type)
         
         # Total loss combining all components
         total_loss_val = total_loss(predicted_masks, binary_loss_val, 
@@ -1441,7 +1490,8 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
                                    goal_trained_state: Optional[train_state.TrainState],
                                    num_epochs: int = 30, learning_rate: float = 1e-3,
                                    sigma1: float = 0.1, sigma2: float = 0.0, batch_size: int = 32, 
-                                   use_true_goals: bool = False, rng: jnp.ndarray = None) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float], List[float], train_state.TrainState, str, float, int]:
+                                   use_true_goals: bool = False, rng: jnp.ndarray = None,
+                                   obs_input_type: str = "full") -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float], List[float], train_state.TrainState, str, float, int]:
     """Train PSN using pretrained goal inference network with validation."""
     if rng is None:
         rng = jax.random.PRNGKey(config.training.seed)
@@ -1478,8 +1528,14 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         weight_decay=5e-4  # L2 regularization to prevent overfitting
     )
     
+    # Determine observation dimensions based on input type
+    if obs_input_type == "partial":
+        obs_dim = 2  # Only position (x, y)
+    else:  # "full"
+        obs_dim = 4  # Full state (x, y, vx, vy)
+    
     # Create train state
-    input_shape = (batch_size, T_observation * N_agents * state_dim)
+    input_shape = (batch_size, T_observation * N_agents * obs_dim)
     state = create_train_state(model, optimizer, input_shape, rng)
     
     # Test gradient flow before training starts
@@ -1549,7 +1605,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
                               position=2, leave=False)
             
             # Prepare batch for training with progress bar
-            observations, masks, reference_trajectories = prepare_batch_for_training_with_progress(batch_data, sample_pbar)
+            observations, masks, reference_trajectories = prepare_batch_for_training_with_progress(batch_data, sample_pbar, obs_input_type)
             
             # Close sample progress bar after preparation
             sample_pbar.close()
@@ -1565,7 +1621,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
             # Training step with game solving
             state, loss, (binary_loss_val, sparsity_loss_val, similarity_loss_val) = train_step(
                 state, (observations, masks, reference_trajectories), batch_data, 
-                goal_model, goal_trained_state, current_sigma1, sigma2, use_true_goals, step_key, similarity_pbar)
+                goal_model, goal_trained_state, current_sigma1, sigma2, use_true_goals, step_key, similarity_pbar, obs_input_type)
             
             epoch_losses.append(float(loss))
             epoch_binary_losses.append(float(binary_loss_val))
@@ -1762,15 +1818,19 @@ if __name__ == "__main__":
         # Load pretrained goal inference model
         goal_model, goal_trained_state = load_pretrained_goal_model(pretrained_goal_model_path)
     
-    # Create PSN model
-    psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims)
+    # Create PSN model with observation type
+    psn_model = PlayerSelectionNetwork(
+        hidden_dims=psn_hidden_dims,
+        obs_input_type=config.psn.obs_input_type
+    )
     
     # Train PSN with appropriate goal source
+    print(f"Observation input type: {config.psn.obs_input_type}")
     training_losses, validation_losses, binary_losses, sparsity_losses, similarity_losses, validation_binary_losses, validation_sparsity_losses, validation_similarity_losses, trained_state, log_dir, best_loss, best_epoch = train_psn_with_pretrained_goals(
         psn_model, training_data, validation_data, goal_model, goal_trained_state,
         num_epochs=num_epochs, learning_rate=learning_rate,
         sigma1=sigma1, sigma2=sigma2, batch_size=batch_size,
-        use_true_goals=use_true_goals
+        use_true_goals=use_true_goals, obs_input_type=config.psn.obs_input_type
     )
     
     # Save final model

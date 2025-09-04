@@ -161,6 +161,7 @@ class GoalInferenceNetwork(nn.Module):
     gru_hidden_size: int = 64
     dropout_rate: float = 0.3
     goal_output_dim: int = N_agents * goal_dim
+    obs_input_type: str = "full"  # "full" or "partial"
     
     @nn.compact
     def __call__(self, x: jnp.ndarray, deterministic: bool = False) -> jnp.ndarray:
@@ -168,7 +169,9 @@ class GoalInferenceNetwork(nn.Module):
         Forward pass of the goal inference network.
         
         Args:
-            x: Input observations (batch_size, T_observation * N_agents * state_dim)
+            x: Input observations 
+                - If obs_input_type="full": (batch_size, T_observation * N_agents * 4)
+                - If obs_input_type="partial": (batch_size, T_observation * N_agents * 2)
             deterministic: Whether to use deterministic mode (no dropout)
             
         Returns:
@@ -176,8 +179,11 @@ class GoalInferenceNetwork(nn.Module):
         """
         batch_size = x.shape[0]
         
+        # Determine input dimension based on observation type
+        input_dim = 2 if self.obs_input_type == "partial" else 4
+        
         # Reshape to separate time steps and agents
-        x = x.reshape(batch_size, T_observation, N_agents, state_dim)
+        x = x.reshape(batch_size, T_observation, N_agents, input_dim)
         
         # Process each agent's trajectory through shared GRU
         agent_features = []
@@ -327,19 +333,25 @@ def load_receding_horizon_trajectories(data_dir: str, validation_split: float = 
     
     return training_data, validation_data
 
-def extract_sliding_window_trajectories(sample_data: Dict[str, Any], window_start: int) -> jnp.ndarray:
+def extract_sliding_window_trajectories(sample_data: Dict[str, Any], window_start: int, obs_input_type: str = "full") -> jnp.ndarray:
     """
     Extract a sliding window of trajectory data from any position.
     
     Args:
         sample_data: Trajectory sample data
         window_start: Starting step for the sliding window (0-indexed)
+        obs_input_type: Observation input type ["full", "partial"]
         
     Returns:
-        observation_trajectory: (T_observation, N_agents, state_dim)
+        observation_trajectory: (T_observation, N_agents, output_dim)
+            - If obs_input_type="full": output_dim = 4 (x, y, vx, vy)
+            - If obs_input_type="partial": output_dim = 2 (x, y)
     """
+    # Determine output dimension based on observation type
+    output_dim = 2 if obs_input_type == "partial" else 4
+    
     # Initialize array to store all agent states
-    observation_trajectory = jnp.zeros((T_observation, N_agents, state_dim))
+    observation_trajectory = jnp.zeros((T_observation, N_agents, output_dim))
     
     for i in range(N_agents):
         agent_key = f"agent_{i}"
@@ -365,6 +377,10 @@ def extract_sliding_window_trajectories(sample_data: Dict[str, Any], window_star
                 last_state = states[-1] if states else [0.0, 0.0, 0.0, 0.0]
                 agent_states = jnp.array([last_state for _ in range(T_observation)])
         
+        # Extract only position data (x, y) if partial observations
+        if obs_input_type == "partial":
+            agent_states = agent_states[:, :2]  # Only x, y coordinates
+        
         # Place in the correct position
         observation_trajectory = observation_trajectory.at[:, i, :].set(agent_states)
     
@@ -374,13 +390,14 @@ def extract_reference_goals(sample_data: Dict[str, Any]) -> jnp.ndarray:
     """Extract goal positions for all agents."""
     return jnp.array(sample_data["target_positions"])
 
-def generate_sliding_window_samples(rh_data: List[Dict[str, Any]], samples_per_trajectory: int = 5) -> List[Tuple[jnp.ndarray, jnp.ndarray]]:
+def generate_sliding_window_samples(rh_data: List[Dict[str, Any]], samples_per_trajectory: int = 5, obs_input_type: str = "full") -> List[Tuple[jnp.ndarray, jnp.ndarray]]:
     """
     Generate multiple sliding window samples from each receding horizon trajectory.
     
     Args:
         rh_data: List of receding horizon trajectory samples
         samples_per_trajectory: Number of sliding windows to extract per trajectory
+        obs_input_type: Observation input type ["full", "partial"]
         
     Returns:
         List of (observation_window, goals) tuples
@@ -406,7 +423,7 @@ def generate_sliding_window_samples(rh_data: List[Dict[str, Any]], samples_per_t
         
         for window_start in window_starts:
             try:
-                obs_window = extract_sliding_window_trajectories(sample_data, window_start)
+                obs_window = extract_sliding_window_trajectories(sample_data, window_start, obs_input_type)
                 sliding_samples.append((obs_window, goals))
             except Exception as e:
                 print(f"Warning: Failed to extract window starting at step {window_start}: {e}")
@@ -422,15 +439,18 @@ def generate_sliding_window_samples(rh_data: List[Dict[str, Any]], samples_per_t
 # TRAINING FUNCTIONS
 # ============================================================================
 
-def create_train_state(model: nn.Module, learning_rate: float) -> train_state.TrainState:
+def create_train_state(model: nn.Module, learning_rate: float, obs_input_type: str = "full") -> train_state.TrainState:
     """Create training state for the model."""
     optimizer = optax.adamw(
         learning_rate=learning_rate,
         weight_decay=5e-4
     )
     
+    # Determine input dimension based on observation type
+    obs_dim = 2 if obs_input_type == "partial" else 4
+    
     # Create dummy input for initialization
-    input_shape = (batch_size, T_observation * N_agents * state_dim)
+    input_shape = (batch_size, T_observation * N_agents * obs_dim)
     dummy_input = jnp.ones(input_shape)
     
     # Initialize model parameters
@@ -533,7 +553,8 @@ def train_goal_inference_network_rh(goal_model: GoalInferenceNetwork,
                                    num_epochs: int = 50, 
                                    learning_rate: float = 0.001,
                                    batch_size: int = 32,
-                                   goal_loss_weight: float = 1.0) -> Tuple[List[float], train_state.TrainState, str, float, int]:
+                                   goal_loss_weight: float = 1.0,
+                                   obs_input_type: str = "full") -> Tuple[List[float], train_state.TrainState, str, float, int]:
     """Train the goal inference network with receding horizon sliding window data."""
     print(f"Training Goal Inference Network on Receding Horizon data...")
     print(f"Training samples: {len(training_samples)}, Validation samples: {len(validation_samples)}")
@@ -547,7 +568,7 @@ def train_goal_inference_network_rh(goal_model: GoalInferenceNetwork,
     writer = SummaryWriter(log_dir=log_dir)
     
     # Create training state
-    state = create_train_state(goal_model, learning_rate)
+    state = create_train_state(goal_model, learning_rate, obs_input_type)
     
     # Training loop
     losses = []
@@ -712,6 +733,7 @@ if __name__ == "__main__":
     print(f"Game parameters: N_agents={N_agents}, T_observation={T_observation}, T_total={T_total}")
     print(f"Training parameters: epochs={num_epochs}, lr={learning_rate}, batch_size={batch_size}")
     print(f"Network parameters: hidden_dims={hidden_dims}, gru_hidden_size={gru_hidden_size}, dropout_rate={dropout_rate}")
+    print(f"Observation type: {config.goal_inference.obs_input_type}")
     print("=" * 60)
     
     # Load receding horizon trajectories
@@ -721,8 +743,9 @@ if __name__ == "__main__":
     # Generate sliding window samples
     print(f"Generating sliding window samples...")
     samples_per_trajectory = 5  # Extract 5 different windows per trajectory
-    training_samples = generate_sliding_window_samples(training_data, samples_per_trajectory)
-    validation_samples = generate_sliding_window_samples(validation_data, samples_per_trajectory)
+    obs_input_type = config.goal_inference.obs_input_type
+    training_samples = generate_sliding_window_samples(training_data, samples_per_trajectory, obs_input_type)
+    validation_samples = generate_sliding_window_samples(validation_data, samples_per_trajectory, obs_input_type)
     
     print(f"Final dataset sizes:")
     print(f"  Training sliding windows: {len(training_samples)}")
@@ -732,7 +755,8 @@ if __name__ == "__main__":
     goal_model = GoalInferenceNetwork(
         hidden_dims=hidden_dims,
         gru_hidden_size=gru_hidden_size,
-        dropout_rate=dropout_rate
+        dropout_rate=dropout_rate,
+        obs_input_type=obs_input_type
     )
     
     # Train the goal inference network
@@ -742,7 +766,8 @@ if __name__ == "__main__":
         num_epochs=num_epochs, 
         learning_rate=learning_rate,
         batch_size=batch_size, 
-        goal_loss_weight=goal_loss_weight
+        goal_loss_weight=goal_loss_weight,
+        obs_input_type=obs_input_type
     )
     
     # Save training results
