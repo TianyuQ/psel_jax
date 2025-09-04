@@ -1176,25 +1176,27 @@ def load_reference_trajectories(data_dir: str) -> Tuple[List[Dict[str, Any]], Li
     print(f"Loaded {len(reference_data)} reference trajectory samples from {data_dir}")
     print(f"Sample files: {len(json_files)} found, {len(reference_data)} loaded successfully")
     
-    # Split data: 75% training, 25% validation
+    # Split data: Load from config
     total_samples = len(reference_data)
-    train_size = int(0.75 * total_samples)
-    val_size = total_samples - train_size
+    train_size = config.training.train_samples
+    val_size = config.training.test_samples
     
-    # Shuffle data for random split
-    import random
-    random.seed(config.training.seed)  # For reproducibility
-    shuffled_data = reference_data.copy()
-    random.shuffle(shuffled_data)
+    # Check if we have enough samples
+    if total_samples < train_size + val_size:
+        print(f"Warning: Only {total_samples} samples available, but need {train_size + val_size} samples")
+        print(f"Using all available samples: {total_samples} for training, 0 for validation")
+        training_data = reference_data
+        validation_data = []
+    else:
+        # Use first 384 samples for training, later 128 samples for testing
+        # Sort by sample_id to ensure consistent ordering
+        reference_data.sort(key=lambda x: x.get('sample_id', 0))
+        
+        training_data = reference_data[:train_size]
+        validation_data = reference_data[train_size:train_size + val_size]
     
-    # Split into training and validation
-    training_data = shuffled_data[:train_size]
-    validation_data = shuffled_data[train_size:]
-    
-    train_percentage = int((1 - 0.25) * 100)  # 75% for training
-    val_percentage = int(0.25 * 100)  # 25% for validation
-    print(f"Training samples: {len(training_data)} ({train_percentage}%)")
-    print(f"Validation samples: {len(validation_data)} ({val_percentage}%)")
+    print(f"Training samples: {len(training_data)} (first {len(training_data)} samples)")
+    print(f"Validation samples: {len(validation_data)} (samples {len(training_data)} to {len(training_data) + len(validation_data) - 1})")
     
     return training_data, validation_data
 

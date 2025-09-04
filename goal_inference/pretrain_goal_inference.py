@@ -265,11 +265,11 @@ def load_and_split_reference_trajectories(data_dir: str, validation_split: float
     
     Args:
         data_dir: Path to directory containing ref_traj_sample_*.json files
-        validation_split: Fraction of data to use for validation
+        validation_split: Fraction of data to use for validation (ignored, using fixed split)
         
     Returns:
-        training_data: List of training samples
-        validation_data: List of validation samples
+        training_data: List of training samples (first 384 samples)
+        validation_data: List of validation samples (later 128 samples)
     """
     import glob
     
@@ -292,18 +292,26 @@ def load_and_split_reference_trajectories(data_dir: str, validation_split: float
             continue
     
     total_samples = len(reference_data)
-    validation_size = int(total_samples * validation_split)
-    training_size = total_samples - validation_size
+    train_size = config.training.train_samples
+    val_size = config.training.test_samples
     
-    # Shuffle data for random split
-    random.shuffle(reference_data)
-    
-    training_data = reference_data[:training_size]
-    validation_data = reference_data[training_size:]
+    # Check if we have enough samples
+    if total_samples < train_size + val_size:
+        print(f"Warning: Only {total_samples} samples available, but need {train_size + val_size} samples")
+        print(f"Using all available samples: {total_samples} for training, 0 for validation")
+        training_data = reference_data
+        validation_data = []
+    else:
+        # Use first 384 samples for training, later 128 samples for testing
+        # Sort by sample_id to ensure consistent ordering
+        reference_data.sort(key=lambda x: x.get('sample_id', 0))
+        
+        training_data = reference_data[:train_size]
+        validation_data = reference_data[train_size:train_size + val_size]
     
     print(f"Loaded {total_samples} reference trajectory samples")
-    print(f"Training samples: {len(training_data)}")
-    print(f"Validation samples: {len(validation_data)}")
+    print(f"Training samples: {len(training_data)} (first {len(training_data)} samples)")
+    print(f"Validation samples: {len(validation_data)} (samples {len(training_data)} to {len(training_data) + len(validation_data) - 1})")
     
     return training_data, validation_data
 

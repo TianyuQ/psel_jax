@@ -34,7 +34,7 @@ game:
   T_observation: 10         # Number of steps to observe before solving the game
 
   # Agent configuration
-  N_agents: 10               # Total number of agents in the game
+  N_agents: 4               # Total number of agents in the game
   ego_agent_id: 0           # ID of the ego agent (usually 0)
   
   # State and control dimensions
@@ -65,6 +65,10 @@ reference_generation:
   # Data generation parameters
   num_samples: 512           # Number of reference trajectory samples to generate
   save_dir: "reference_trajectories_${N_agents}p"  # Directory to save reference trajectories
+  
+  # Data split configuration
+  train_samples: 384         # Number of samples to use for training (first N samples)
+  test_samples: 128          # Number of samples to use for testing (later N samples)
   
   # Trajectory type
   trajectory_type: "linear" # Type of reference trajectory ["linear", "spline", "polynomial"]
@@ -130,7 +134,7 @@ psn:
   num_epochs: 100            # Number of training epochs
   
   # Loss function weights
-  sigma1: 0.05              # Weight for mask sparsity loss
+  sigma1: 0.075              # Weight for mask sparsity loss
   sigma2: 0.05               # Weight for mask diversity loss
   
   # Goal source configuration
@@ -157,6 +161,10 @@ training:
   # IMPORTANT: Training should ALWAYS use reference trajectories
   data_source: "reference_trajectories"     # Use reference trajectories for training
   data_dir: "reference_trajectories_${N_agents}p"  # Directory containing reference trajectory data
+  
+  # Data split configuration
+  train_samples: 384         # Number of samples to use for training (first N samples)
+  test_samples: 128          # Number of samples to use for testing (later N samples)
   
   # General training settings
   seed: 42                  # Random seed for reproducibility
@@ -195,6 +203,10 @@ testing:
   # PSN testing data  
   psn_data_source: "receding_horizon_trajectories"
   psn_data_dir: "receding_horizon_trajectories_${N_agents}p"  # PSN tests on receding horizon trajectories
+  
+  # Data split configuration (shared across all testing)
+  train_samples: 384         # Number of samples to use for training (first N samples)
+  test_samples: 128          # Number of samples to use for testing (later N samples)
   
   # Legacy/general testing parameters (for backward compatibility)
   data_source: "receding_horizon_trajectories"  # Default for PSN testing
@@ -307,6 +319,10 @@ paths:
   goal_inference_testing_data_dir: "reference_trajectories_${N_agents}p"      # Goal inference testing (tests goal prediction)
   psn_testing_data_dir: "receding_horizon_trajectories_${N_agents}p"          # PSN testing (tests player selection)
   testing_data_dir: "receding_horizon_trajectories_${N_agents}p"              # Default/legacy testing directory
+  
+  # Data split configuration (shared across all data loading)
+  train_samples: 384         # Number of samples to use for training (first N samples)
+  test_samples: 128          # Number of samples to use for testing (later N samples)
 
   # Model directories
   models_dir: "models"
@@ -322,16 +338,6 @@ paths:
 # ============================================================================
 debug:
   # Debug mode settings
-  debug_mode: false         # Whether to run in debug mode
-  small_dataset: false      # Whether to use a small dataset for debugging
-  verbose_logging: false    # Whether to enable verbose logging
-  
-  # Memory and performance
-  jax_debug_nans: false     # Whether to enable JAX NaN debugging
-  jax_disable_jit: false    # Whether to disable JIT compilation for debugging
-  
-  # Gradient checking
-  check_gradients: false    # Whether to perform gradient checking
   gradient_clip_value: 1.0  # Value for gradient clipping
 
 # ============================================================================
@@ -340,10 +346,8 @@ debug:
 device:
   # Device selection
   preferred_device: "gpu"   # Preferred device ["gpu", "cpu", "auto"]
-  gpu_memory_fraction: 0.9  # Fraction of GPU memory to use
   
   # JAX configuration
-  jax_enable_x64: false     # Whether to enable 64-bit precision
   jax_platform_name: null  # JAX platform name (null = auto-detect)
 
 # ============================================================================

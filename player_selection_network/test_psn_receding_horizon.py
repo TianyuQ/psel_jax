@@ -446,6 +446,8 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                                      goal_model: GoalInferenceNetwork,
                                      goal_trained_state: Any,
                                      psn_model_path: str = None) -> Dict[str, Any]:
+    # TODO: write option here.
+
     """
     Test receding horizon planning with goal inference and player selection models.
     
@@ -643,6 +645,10 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             obs_array = jnp.array(obs_traj)  # (T_observation, n_agents, state_dim)
             obs_input = obs_array.reshape(1, T_observation, n_agents, 4)  # (1, 10, 4, 4)
             
+            # To Eric, how to select players:
+            # selected players is the vector of selected players' index.
+            # selected_agents = Baseline_Selection(obs_input, masked_threhold, desired_number_of_agents, option)
+
             predicted_mask = psn_model.apply({'params': psn_trained_state['params']}, obs_input, deterministic=True)
             predicted_mask = predicted_mask[0]  # Remove batch dimension
             
