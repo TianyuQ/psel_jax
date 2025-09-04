@@ -923,17 +923,28 @@ def compute_similarity_loss_from_masked_game(sample_data: Dict[str, Any], ego_ag
     
     return similarity_val
 
-def _observations_to_initial_states(obs_row: jnp.ndarray) -> jnp.ndarray:
+def _observations_to_initial_states(obs_row: jnp.ndarray, obs_input_type: str = "full") -> jnp.ndarray:
     """Convert a flattened observations row into initial 4D states for each agent.
-    obs_row: shape (T_observation * N_agents * state_dim,)
+    obs_row: shape (T_observation * N_agents * obs_dim,)
     returns: (N_agents, 4)
     """
-    traj = obs_row.reshape(T_observation, N_agents, state_dim)
-    first = traj[0]  # (N_agents, state_dim)
-    # Use position and velocity from the first observed state
-    pos = first[:, :2]
-    vel = first[:, 2:4]
-    return jnp.concatenate([pos, vel], axis=-1)
+    # Determine observation dimension based on input type
+    obs_dim = 2 if obs_input_type == "partial" else 4
+    
+    traj = obs_row.reshape(T_observation, N_agents, obs_dim)
+    first = traj[0]  # (N_agents, obs_dim)
+    
+    if obs_input_type == "partial":
+        # For partial observations, we only have position (x, y)
+        # Set velocity to zero
+        pos = first[:, :2]  # (N_agents, 2)
+        vel = jnp.zeros((N_agents, 2))  # (N_agents, 2) - zero velocity
+        return jnp.concatenate([pos, vel], axis=-1)
+    else:
+        # For full observations, we have position and velocity
+        pos = first[:, :2]
+        vel = first[:, 2:4]
+        return jnp.concatenate([pos, vel], axis=-1)
 
 def compute_similarity_loss_from_arrays(agents: list,
                                         initial_states: jnp.ndarray,
@@ -994,7 +1005,7 @@ def compute_batch_similarity_loss(predicted_masks: jnp.ndarray,
         goals = predicted_goals[i]
         obs_row = observations[i]
         ref_ego = ref_trajs[i]
-        init_states = _observations_to_initial_states(obs_row)
+        init_states = _observations_to_initial_states(obs_row, obs_input_type)
         return compute_similarity_loss_from_arrays(shared_agents, init_states, goals, mask, ref_ego)
 
     valid_bs = min(predicted_masks.shape[0], observations.shape[0])

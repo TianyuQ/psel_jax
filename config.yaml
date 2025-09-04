@@ -34,7 +34,7 @@ game:
   T_observation: 10         # Number of steps to observe before solving the game
 
   # Agent configuration
-  N_agents: 10               # Total number of agents in the game
+  N_agents: 4               # Total number of agents in the game
   ego_agent_id: 0           # ID of the ego agent (usually 0)
   
   # State and control dimensions
