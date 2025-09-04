@@ -179,7 +179,7 @@ else:
 
 # ============================================================================
 # Import GoalInferenceNetwork from the goal inference module
-from goal_inference.pretrain_goal_inference import GoalInferenceNetwork
+from goal_inference.pretrain_goal_inference_rh import GoalInferenceNetwork
 
 def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: str = "full") -> jnp.ndarray:
     """
@@ -1162,12 +1162,12 @@ def total_loss(mask: jnp.ndarray, binary_loss_val: jnp.ndarray,
 # GOAL INFERENCE INTEGRATION
 # ============================================================================
 
-def load_pretrained_goal_model(model_path: str) -> Tuple[GoalInferenceNetwork, train_state.TrainState]:
+def load_pretrained_goal_model(model_path: str, obs_input_type: str = "full") -> Tuple[GoalInferenceNetwork, train_state.TrainState]:
     """Load the pretrained goal inference model."""
     print(f"Loading pretrained goal inference model from: {model_path}")
     
     # Create model instance
-    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims)
+    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims, obs_input_type=obs_input_type)
     
     # Load trained parameters
     with open(model_path, 'rb') as f:
@@ -1175,7 +1175,8 @@ def load_pretrained_goal_model(model_path: str) -> Tuple[GoalInferenceNetwork, t
     
     # Recreate train state
     optimizer = optax.adamw(learning_rate=config.goal_inference.learning_rate, weight_decay=5e-4)  # Dummy optimizer for inference
-    input_shape = (1, T_observation * N_agents * state_dim)
+    obs_dim = 2 if obs_input_type == "partial" else 4
+    input_shape = (1, T_observation * N_agents * obs_dim)
     dummy_state = create_train_state(goal_model, optimizer, input_shape, jax.random.PRNGKey(config.training.seed))
     
     # Load parameters
@@ -1507,12 +1508,12 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
     if use_true_goals:
         # When using true goals, save under a separate "goal_true" directory
         goal_true_dir = os.path.join(os.path.dirname(goal_model_dir), "goal_true_N_" + str(N_agents) + "_T_" + str(T_total) + "_obs_" + str(T_observation))
-        config_name = f"psn_gru_true_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
+        config_name = f"psn_gru_{obs_input_type}_true_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
         log_dir = os.path.join(goal_true_dir, config_name)
         print(f"Training with TRUE goals - PSN logs will be saved under: {goal_true_dir}")
     else:
         # When using predicted goals, save under the goal inference model directory
-        config_name = f"psn_gru_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
+        config_name = f"psn_gru_{obs_input_type}_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
         log_dir = os.path.join(goal_model_dir, config_name)
         print(f"Training with PREDICTED goals - PSN logs will be saved under goal inference model directory: {goal_model_dir}")
     
@@ -1754,13 +1755,14 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
 # MODEL LOADING UTILITIES
 # ============================================================================
 
-def load_trained_models(psn_model_path: str, goal_model_path: str) -> Tuple[PlayerSelectionNetwork, Any, GoalInferenceNetwork, Any]:
+def load_trained_models(psn_model_path: str, goal_model_path: str, obs_input_type: str = "full") -> Tuple[PlayerSelectionNetwork, Any, GoalInferenceNetwork, Any]:
     """
     Load trained PSN and goal inference models from files.
     
     Args:
         psn_model_path: Path to the trained PSN model file
         goal_model_path: Path to the trained goal inference model file
+        obs_input_type: Observation input type ["full", "partial"]
         
     Returns:
         Tuple of (psn_model, psn_trained_state, goal_model, goal_trained_state)
@@ -1772,7 +1774,7 @@ def load_trained_models(psn_model_path: str, goal_model_path: str) -> Tuple[Play
         psn_model_bytes = pickle.load(f)
     
     # Create the PSN model
-    psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims)
+    psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims, obs_input_type=obs_input_type)
     
     # Deserialize the PSN state
     psn_trained_state = flax.serialization.from_bytes(psn_model, psn_model_bytes)
@@ -1785,7 +1787,7 @@ def load_trained_models(psn_model_path: str, goal_model_path: str) -> Tuple[Play
         goal_model_bytes = pickle.load(f)
     
     # Create the goal inference model
-    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims)
+    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims, obs_input_type=obs_input_type)
     
     # Deserialize the goal inference state
     goal_trained_state = flax.serialization.from_bytes(goal_model, goal_model_bytes)
@@ -1816,7 +1818,7 @@ if __name__ == "__main__":
     else:
         print("Training PSN with PREDICTED goals from goal inference model")
         # Load pretrained goal inference model
-        goal_model, goal_trained_state = load_pretrained_goal_model(pretrained_goal_model_path)
+        goal_model, goal_trained_state = load_pretrained_goal_model(pretrained_goal_model_path, config.psn.obs_input_type)
     
     # Create PSN model with observation type
     psn_model = PlayerSelectionNetwork(
