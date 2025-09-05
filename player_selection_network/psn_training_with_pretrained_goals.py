@@ -1346,7 +1346,7 @@ def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndar
 
 def validation_step(state: train_state.TrainState, validation_data: List[Dict[str, Any]],
                    goal_model: Optional[GoalInferenceNetwork], goal_trained_state: Optional[train_state.TrainState],
-                   batch_size: int = 32, ego_agent_id: int = 0, use_true_goals: bool = False) -> Tuple[float, float, float, float, List[jnp.ndarray]]:
+                   batch_size: int = 32, ego_agent_id: int = 0, use_true_goals: bool = False, obs_input_type: str = "full") -> Tuple[float, float, float, float, List[jnp.ndarray]]:
     """
     Perform validation on the validation dataset.
     
@@ -1376,7 +1376,7 @@ def validation_step(state: train_state.TrainState, validation_data: List[Dict[st
         batch_data = validation_data[start_idx:end_idx]
         
         # Prepare batch for validation
-        observations, masks, reference_trajectories = prepare_batch_for_training(batch_data)
+        observations, masks, reference_trajectories = prepare_batch_for_training(batch_data, obs_input_type)
         
         # Get predicted mask from PSN (validation mode, no dropout)
         predicted_masks = state.apply_fn({'params': state.params}, observations, deterministic=True)
@@ -1666,7 +1666,7 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
         
         # Perform validation
         val_loss, val_binary_loss, val_sparsity_loss, val_similarity_loss, val_masks = validation_step(
-            state, validation_data, goal_model, goal_trained_state, batch_size, ego_agent_id=ego_agent_id, use_true_goals=use_true_goals)
+            state, validation_data, goal_model, goal_trained_state, batch_size, ego_agent_id=ego_agent_id, use_true_goals=use_true_goals, obs_input_type=obs_input_type)
         validation_losses.append(val_loss)
         validation_binary_losses.append(val_binary_loss)
         validation_sparsity_losses.append(val_sparsity_loss)
