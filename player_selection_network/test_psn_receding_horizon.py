@@ -35,7 +35,8 @@ from config_loader import load_config, get_device_config, setup_jax_config
 from psn_training_with_pretrained_goals import (
     PlayerSelectionNetwork, GoalInferenceNetwork, load_trained_models
 )
-
+# Import baselines
+from baselines import baseline_selection
 
 # ============================================================================
 # LOAD CONFIGURATION AND SETUP
@@ -441,13 +442,14 @@ def extract_reference_goals(sample_data: Dict[str, Any]) -> jnp.ndarray:
 
 
 def test_receding_horizon_with_models(sample_data: Dict[str, Any],
-                                     psn_model: PlayerSelectionNetwork,
-                                     psn_trained_state: Any,
-                                     goal_model: GoalInferenceNetwork,
-                                     goal_trained_state: Any,
-                                     psn_model_path: str = None) -> Dict[str, Any]:
-    # TODO: write option here.
+                                      psn_model: PlayerSelectionNetwork,
+                                      psn_trained_state: Any,
+                                      goal_model: GoalInferenceNetwork,
+                                      goal_trained_state: Any,
+                                      psn_model_path: str = None,
+                                      option: str = None) -> Dict[str, Any]:
 
+    
     """
     Test receding horizon planning with goal inference and player selection models.
     
@@ -457,6 +459,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         psn_trained_state: Trained PSN model state
         goal_model: Trained goal inference model
         goal_trained_state: Trained goal inference model state
+        option: Baseline option to use instead of PSN model (if any)
     
     Returns:
         Dictionary containing test results
@@ -493,7 +496,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     
     # Phase 1: Observation period (steps 1-T_observation) - use ground truth trajectories
     print(f"    Phase 1: Observation period (steps 1-{T_observation})")
-    for step in range(T_observation):        
+    for step in range(T_observation):
         # Add ground truth states for all agents
         for agent_idx in range(n_agents):
             agent_key = f"agent_{agent_idx}"
@@ -509,7 +512,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     
     # Phase 2: Receding horizon planning with models (steps T_observation+1 to T_total)
     print(f"    Phase 2: Receding horizon planning with models (steps {T_observation+1} to {T_total})")
-    print(f"      Initial stabilization: {config.testing.receding_horizon.initial_stabilization_iterations} iterations")
+    print(f"        Initial stabilization: {config.testing.receding_horizon.initial_stabilization_iterations} iterations")
     
     # Initialize receding horizon trajectories
     receding_horizon_trajectories = [[] for _ in range(n_agents)]
@@ -528,7 +531,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             current_states.append(jnp.array(sample_states[T_observation - 1] if len(sample_states) >= T_observation else sample_states[-1]))
     
     # Main receding horizon loop
-    for iteration in range(T_receding_horizon_iterations):        
+    for iteration in range(T_receding_horizon_iterations):
         # Decide whether to use models or default values based on iteration
         if iteration < config.testing.receding_horizon.initial_stabilization_iterations:
             # First N iterations: Use ground truth goals and all agents (mask = 1)
@@ -553,7 +556,6 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 if input_method == "first_steps":
                     # Use first T_observation steps from the original ground truth trajectory
                     goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
-                    
                 elif input_method == "sliding_window":
                     # Use sliding window: latest T_observation steps from current game state
                     current_total_steps = T_observation + iteration
@@ -588,7 +590,6 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                     
                     # Convert to array format
                     goal_obs_traj = jnp.array(goal_obs_traj)  # (T_observation, N_agents, state_dim)
-                    
                 else:
                     raise ValueError(f"Invalid goal_inference_input_method: {input_method}. Must be 'first_steps' or 'sliding_window'")
                 
@@ -644,13 +645,30 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             # Convert to array and reshape to (1, T_observation, n_agents, state_dim)
             obs_array = jnp.array(obs_traj)  # (T_observation, n_agents, state_dim)
             obs_input = obs_array.reshape(1, T_observation, n_agents, 4)  # (1, 10, 4, 4)
-            
-            # To Eric, how to select players:
-            # selected players is the vector of selected players' index.
-            # selected_agents = Baseline_Selection(obs_input, masked_threhold, desired_number_of_agents, option)
+        
+            # Uses the 'option' parameter to switch between the baseline and the PSN model.
+            if option:
+                # A baseline method is specified, so prepare arguments and call it.
+                mode_parameter = config.testing.receding_horizon.baseline_parameter
+                trajectory_history = [np.array(current_game_state["trajectories"][f"agent_{i}"]["states"]) for i in range(n_agents)]
+                
+                if iteration > config.testing.receding_horizon.initial_stabilization_iterations:
+                    prev_controls = [np.array(c) for c in results['receding_horizon_results'][-1]['first_controls']]
+                else:
+                    prev_controls = [np.zeros(2) for _ in range(n_agents)]
 
-            predicted_mask = psn_model.apply({'params': psn_trained_state['params']}, obs_input, deterministic=True)
-            predicted_mask = predicted_mask[0]  # Remove batch dimension
+                predicted_mask = baseline_selection(
+                    input_traj=obs_input,
+                    trajectory=trajectory_history,
+                    control=prev_controls,
+                    mode=option,
+                    sim_step=iteration,
+                    mode_parameter=mode_parameter
+                )
+            else:
+                # No baseline option given, so use the original PSN model logic.
+                predicted_mask = psn_model.apply({'params': psn_trained_state['params']}, obs_input, deterministic=True)
+                predicted_mask = predicted_mask[0]  # Remove batch dimension
             
             # Apply threshold to get selected agents
             mask_threshold = config.testing.receding_horizon.mask_threshold
