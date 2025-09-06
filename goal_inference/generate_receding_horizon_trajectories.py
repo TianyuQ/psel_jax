@@ -558,10 +558,12 @@ def load_reference_trajectory_sample(sample_id: int, reference_dir: str) -> tupl
     
     # Determine boundary size based on number of agents
     n_agents = len(init_positions)
-    if n_agents <= 4:
+    if n_agents == 4:
         boundary_size = 2.5  # -2.5m to 2.5m for 4 agents
-    else:
+    elif n_agents == 10:
         boundary_size = 3.5  # -3.5m to 3.5m for 10+ agents
+    else:
+        boundary_size = 5.5  # -5.5m to 5.5m for 20+ agents
     
     return init_positions, target_positions, boundary_size
 

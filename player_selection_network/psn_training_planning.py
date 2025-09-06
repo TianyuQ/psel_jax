@@ -1,0 +1,2000 @@
+#!/usr/bin/env python3
+"""
+PSN Training with Pretrained Goal Inference Network
+
+This script trains the Player Selection Network (PSN) using a pretrained
+goal inference network. The PSN learns to select important agents while
+the goal inference network provides accurate goal predictions.
+
+Stage 2 of the two-stage training approach:
+1. Stage 1: Pretrain Goal Inference Network (completed)
+2. Stage 2: Train PSN using pretrained goals (this script)
+
+Log Organization:
+- PSN training logs are organized under the specific goal inference model directory
+- Structure: log/goal_inference_*/psn_pretrained_goals_*/
+- This allows easy comparison between different goal inference models
+
+DEBUG MODE:
+- Using small dataset for faster debugging
+- Game solving is preserved - masks affect game dynamics
+- Focus on fixing gradient flow in the game-solving pipeline
+
+Author: Assistant
+Date: 2024
+"""
+
+# Set JAX environment variables to help with GPU issues
+import os
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'
+
+import json
+import numpy as np
+import jax
+import jax.numpy as jnp
+from typing import List, Dict, Tuple, Any, Optional
+import time
+from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+plt.ioff()  # Turn off interactive mode
+import pickle
+from tqdm import tqdm
+import os
+from datetime import datetime
+import gc
+from torch.utils.tensorboard import SummaryWriter
+import torch.utils.tensorboard as tb
+
+# JAX/Flax imports
+import flax.linen as nn
+import optax
+from flax.training import train_state
+import flax.serialization
+
+# Import from the main lqrax module
+import sys
+import os
+# Add parent directory to path for imports
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, parent_dir)
+from lqrax import iLQR  # Now needed for PointAgent
+from config_loader import load_config
+
+# Import the goal inference network
+# Copy the necessary classes and functions directly to avoid import issues
+
+
+# ============================================================================
+# AGENT DEFINITIONS
+# ============================================================================
+
+class PointAgent(iLQR):
+    """
+    Point mass agent for trajectory optimization.
+    
+    State: [x, y, vx, vy] - position (x,y) and velocity (vx, vy)
+    Control: [ax, ay] - acceleration in x and y directions
+    
+    Dynamics:
+        dx/dt = vx
+        dy/dt = vy
+        dvx/dt = ax
+        dvy/dt = ay
+    """
+    def __init__(self, dt, x_dim, u_dim, Q, R):
+        super().__init__(dt, x_dim, u_dim, Q, R)
+    
+    def dyn(self, x, u):
+        """Dynamics function for point mass."""
+        return jnp.array([
+            x[2],  # dx/dt = vx
+            x[3],  # dy/dt = vy
+            u[0],  # dvx/dt = ax
+            u[1]   # dvy/dt = ay
+        ])
+
+# ============================================================================
+# GLOBAL PARAMETERS
+# ============================================================================
+
+# Load configuration from config.yaml
+config = load_config()
+
+# Game parameters
+N_agents = config.game.N_agents
+ego_agent_id = config.game.ego_agent_id
+dt = config.game.dt
+T_total = config.game.T_total
+T_observation = config.goal_inference.observation_length
+T_reference = config.game.T_total
+state_dim = config.game.state_dim
+control_dim = config.game.control_dim
+
+# PSN training parameters
+num_epochs = config.psn.num_epochs
+learning_rate = config.psn.learning_rate
+batch_size = config.psn.batch_size
+sigma1 = config.psn.sigma1  # Final mask sparsity weight (will gradually increase from 0)
+sigma2 = config.psn.sigma2  # Binary loss weight
+
+# Game solving parameters
+num_iters = config.optimization.num_iters
+
+# Reference trajectory parameters - use training data directory for training
+# Use dataset directory for loading individual sample files
+# This directory contains ref_traj_sample_*.json files
+reference_dir = config.training.data_dir
+
+# Pretrained goal inference model path
+# Use the template to generate the path based on current config parameters
+pretrained_goal_model_path = config.testing.goal_inference_model_template.format(
+        N_agents=config.game.N_agents,
+        T_total=config.game.T_total,
+        T_observation=config.goal_inference.observation_length,
+        learning_rate=config.goal_inference.learning_rate,
+        batch_size=config.goal_inference.batch_size,
+        goal_loss_weight=config.goal_inference.goal_loss_weight,
+        num_epochs=config.goal_inference.num_epochs
+    )
+
+# Set hidden dimensions based on number of agents for both networks
+if N_agents == 4:
+    goal_inference_hidden_dims = config.goal_inference.hidden_dims_4p
+    psn_hidden_dims = config.psn.hidden_dims_4p
+elif N_agents == 10:
+    goal_inference_hidden_dims = config.goal_inference.hidden_dims_10p
+    psn_hidden_dims = config.psn.hidden_dims_10p
+else:
+    # Default fallback to 4p dimensions
+    goal_inference_hidden_dims = config.goal_inference.hidden_dims_4p
+    psn_hidden_dims = config.psn.hidden_dims_4p
+    print(f"Warning: Using 4p hidden dimensions for {N_agents} agents")
+
+# Device selection - Use config preference
+if config.device.preferred_device == "gpu":
+    gpu_devices = jax.devices("gpu")
+    if gpu_devices:
+        device = gpu_devices[0]
+        print(f"Using GPU: {device}")
+        os.environ['JAX_PLATFORM_NAME'] = 'gpu'
+        print("JAX platform forced to: gpu")
+        
+        # Test GPU functionality with a simple operation
+        test_array = jax.random.normal(jax.random.PRNGKey(config.training.seed), (10, 10))
+        test_result = jnp.linalg.inv(test_array)
+        print("GPU matrix operations working correctly")
+    else:
+        if config.device.preferred_device == "gpu":
+            raise RuntimeError("No GPU devices found, but GPU is preferred")
+        else:
+            print("No GPU devices found, falling back to CPU")
+            device = jax.devices("cpu")[0]
+            print(f"Using CPU: {device}")
+else:
+    device = jax.devices("cpu")[0]
+    print(f"Using CPU: {device}")
+
+# ============================================================================
+# Import GoalInferenceNetwork from the goal inference module
+from goal_inference.pretrain_goal_inference_rh import GoalInferenceNetwork
+
+def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: str = "full") -> jnp.ndarray:
+    """
+    Extract observation trajectory (first 10 steps) for all agents.
+    
+    Args:
+        sample_data: Reference trajectory sample
+        obs_input_type: Observation input type ["full", "partial"]
+        
+    Returns:
+        observation_trajectory: Observation trajectory 
+            - If obs_input_type="full": (T_observation, N_agents, 4)
+            - If obs_input_type="partial": (T_observation, N_agents, 2)
+    """
+    # Determine output dimensions based on observation type
+    if obs_input_type == "partial":
+        output_dim = 2  # Only position (x, y)
+    else:  # "full"
+        output_dim = 4  # Full state (x, y, vx, vy)
+    
+    # Initialize array to store all agent states
+    # Shape: (T_observation, N_agents, output_dim)
+    observation_trajectory = jnp.zeros((T_observation, N_agents, output_dim))
+    
+    for i in range(N_agents):
+        agent_key = f"agent_{i}"
+        states = sample_data["trajectories"][agent_key]["states"]
+        # Take first T_observation steps
+        agent_states = jnp.array(states[:T_observation])  # (T_observation, state_dim)
+        
+        # Extract relevant dimensions based on observation type
+        if obs_input_type == "partial":
+            # Only use position (x, y) - first 2 dimensions
+            agent_obs = agent_states[:, :2]  # (T_observation, 2)
+        else:  # "full"
+            # Use full state (x, y, vx, vy) - all 4 dimensions
+            agent_obs = agent_states[:, :4]  # (T_observation, 4)
+        
+        # Place in the correct position: (T_observation, N_agents, output_dim)
+        observation_trajectory = observation_trajectory.at[:, i, :].set(agent_obs)
+    
+    return observation_trajectory
+
+# ============================================================================
+# PSN NETWORK DEFINITIONS (GOAL-FREE VERSION)
+# ============================================================================
+class PlayerSelectionNetwork(nn.Module):
+    """
+    Player Selection Network (PSN) using GRU for temporal sequence processing.
+    
+    Input: First 10 steps of all agents' trajectories 
+        - If obs_input_type="full": (T_observation * N_agents * 4)
+        - If obs_input_type="partial": (T_observation * N_agents * 2)
+    Output: Binary mask for selecting other agents (excluding ego agent)
+    """
+    
+    hidden_dims: List[int]
+    gru_hidden_size: int = 64
+    dropout_rate: float = 0.3
+    mask_output_dim: int = N_agents - 1  # Mask for other agents (excluding ego)
+    obs_input_type: str = "full"  # "full" or "partial"
+    
+    @nn.compact
+    def __call__(self, x, deterministic: bool = False):
+        """
+        Forward pass of PSN.
+        
+        Args:
+            x: Input tensor 
+                - If obs_input_type="full": (batch_size, T_observation * N_agents * 4)
+                - If obs_input_type="partial": (batch_size, T_observation * N_agents * 2)
+            deterministic: Whether to use deterministic mode (no dropout)
+            
+        Returns:
+            mask: Binary mask of shape (batch_size, N_agents - 1)
+        """
+        # Determine input dimensions based on observation type
+        if self.obs_input_type == "partial":
+            input_dim = 2  # Only position (x, y)
+        else:  # "full"
+            input_dim = 4  # Full state (x, y, vx, vy)
+        
+        # Reshape input to (batch_size, T_observation, N_agents, input_dim)
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size, T_observation, N_agents, input_dim)
+        
+        # Process each agent's trajectory through shared GRU
+        agent_features = []
+        
+        for agent_idx in range(N_agents):
+            # Extract trajectory for this agent: (batch_size, T_observation, state_dim)
+            agent_traj = x[:, :, agent_idx, :]
+            
+            # Use simple GRU cell with manual scanning for compatibility
+            gru_cell = nn.GRUCell(features=self.gru_hidden_size, name=f'gru_agent_{agent_idx}')
+            
+            # Initialize hidden state
+            init_hidden = jnp.zeros((batch_size, self.gru_hidden_size))
+            
+            # Process sequence step by step
+            hidden = init_hidden
+            for t in range(T_observation):
+                hidden, _ = gru_cell(hidden, agent_traj[:, t, :])
+            
+            # Use final hidden state as agent representation
+            agent_features.append(hidden)
+        
+        # Concatenate all agent features: (batch_size, N_agents * gru_hidden_size)
+        x = jnp.concatenate(agent_features, axis=1)
+        
+        # Apply MLP head for mask prediction
+        for i, hidden_dim in enumerate(self.hidden_dims):
+            x = nn.Dense(features=hidden_dim, name=f'mask_head_{i}')(x)
+            x = nn.relu(x)
+            if i < len(self.hidden_dims) - 1:  # Don't apply dropout to last layer
+                x = nn.Dropout(rate=self.dropout_rate, name=f'mask_dropout_{i}')(x, deterministic=deterministic)
+        
+        # Mask output
+        mask = nn.Dense(features=self.mask_output_dim, name='mask_output')(x)
+        mask = nn.sigmoid(mask)  # Binary mask
+        
+        return mask
+
+# ============================================================================
+# GOAL EXTRACTION FUNCTIONS
+# ============================================================================
+
+def extract_true_goals_from_batch(batch_data: List[Dict[str, Any]]) -> jnp.ndarray:
+    """
+    Extract true goals from batch data for training with true goals.
+    
+    Args:
+        batch_data: List of sample data dictionaries
+        
+    Returns:
+        Array of true goals (batch_size, N_agents * 2)
+    """
+    batch_goals = []
+    
+    for sample_data in batch_data:
+        # Extract goals for all agents from the reference trajectory
+        sample_goals = []
+        for agent_idx in range(N_agents):
+            agent_key = f"agent_{agent_idx}"
+            agent_states = sample_data["trajectories"][agent_key]["states"]
+            
+            # Use the final state position as the goal
+            if len(agent_states) > 0:
+                final_state = agent_states[-1]
+                goal_pos = jnp.array([final_state[0], final_state[1]])  # [x, y] from [x, y, vx, vy]
+            else:
+                # Fallback to zero if no states available
+                goal_pos = jnp.array([0.0, 0.0])
+            
+            sample_goals.append(goal_pos)
+        
+        # Flatten all agent goals into a single array
+        sample_goals_flat = jnp.concatenate(sample_goals)  # (N_agents * 2,)
+        batch_goals.append(sample_goals_flat)
+    
+    # Stack all samples into a batch
+    batch_goals_array = jnp.stack(batch_goals)  # (batch_size, N_agents * 2)
+    return batch_goals_array
+
+
+# ============================================================================
+# GAME SOLVING FUNCTIONS
+# ============================================================================
+
+def create_masked_game_setup(sample_data: Dict[str, Any], ego_agent_id: int,
+                           predicted_mask: jnp.ndarray, predicted_goals: jnp.ndarray, 
+                           is_training: bool = True) -> Tuple[List, List, jnp.ndarray, jnp.ndarray]:
+    """
+    Create masked game setup based on predicted mask and goals.
+    
+    During training: ALL agents are included, but only agent 0 (ego agent) uses mask values
+    for mutual costs. Other agents always consider full mutual costs with all agents.
+    During runtime: Only selected agents are included based on binary mask threshold.
+    
+    Args:
+        sample_data: Reference trajectory sample
+        ego_agent_id: ID of the ego agent
+        predicted_mask: Predicted mask from PSN (N_agents - 1)
+        predicted_goals: Predicted goals from pretrained network (N_agents * 2)
+        is_training: Whether this is for training (masked mutual costs) or testing (agent selection)
+        
+    Returns:
+        agents: List of selected agents
+        initial_states: List of initial states for selected agents
+        target_positions: Target positions for selected agents
+        mask_values: Mask values for the game
+    """
+    # Parse predicted goals
+    predicted_goals = predicted_goals.reshape(-1, 2)  # (N_agents, 2)
+    
+    if is_training:
+        # Training time: Include ALL agents, mask values multiply the mutual costs
+        # This implements the equation: \tilde{c}_{s,k}^i = \sum_{j=1}^N m^{ij}c_k^{ij}
+        agents = []
+        initial_states = []
+        target_positions = []
+        
+        # Cost function weights (same for all agents) - matching original ilqgames_example.py
+        Q = jnp.diag(jnp.array([0.1, 0.1, 0.001, 0.001]))  # State cost weights [x, y, vx, vy]
+        R = jnp.diag(jnp.array([0.01, 0.01]))               # Control cost weights [ax, ay]
+        
+        # Get initial positions from sample data
+        original_positions = []
+        for agent_id in range(N_agents):
+            agent_key = f"agent_{agent_id}"
+            agent_states = sample_data["trajectories"][agent_key]["states"]
+            pos_2d = jnp.array(agent_states[0][:2])  # [x, y]
+            original_positions.append(pos_2d)
+        
+        # Create conflicting scenario: agents start in corners and cross paths
+        # Similar to ilqgames_example.py setup with crossing trajectories
+        
+        # Define 4 starting positions in corners of a square
+        start_positions = [
+            jnp.array([-1.0, -1.0]),  # Agent 0: bottom-left
+            jnp.array([1.0, -1.0]),   # Agent 1: bottom-right  
+            jnp.array([1.0, 1.0]),    # Agent 2: top-right
+            jnp.array([-1.0, 1.0])    # Agent 3: top-left
+        ]
+        
+        # Define 4 goal positions: each agent goes to opposite corner (crossing paths)
+        goal_positions = [
+            jnp.array([1.0, 1.0]),    # Agent 0: to top-right
+            jnp.array([-1.0, 1.0]),   # Agent 1: to top-left
+            jnp.array([-1.0, -1.0]),  # Agent 2: to bottom-left  
+            jnp.array([1.0, -1.0])    # Agent 3: to bottom-right
+        ]
+        
+        for agent_id in range(N_agents):
+            # Create agent
+            agent = PointAgent(dt=dt, x_dim=4, u_dim=2, Q=Q, R=R)
+            agents.append(agent)
+            
+            # Set initial state: [x, y, vx, vy] starting from zero velocity
+            start_pos = start_positions[agent_id]
+            initial_state = jnp.array([start_pos[0], start_pos[1], 0.0, 0.0])
+            initial_states.append(initial_state)
+            
+            # Set goal position (crossing path scenario)
+            target_positions.append(goal_positions[agent_id])
+        
+        # For training, only agent 0 (ego agent) uses the mask
+        # Other agents have full interaction with all agents (no masking)
+        # Simply return the mask values directly - they will only be used by agent 0
+        return agents, initial_states, jnp.array(target_positions), predicted_mask
+        
+    else:
+        # Runtime: Only include selected agents based on binary mask threshold
+        # This implements the equation: m_{ij} > m_th -> 1, otherwise 0
+        selected_agents = [ego_agent_id]
+        mask_values = []
+        
+        for i in range(N_agents - 1):
+            # Map mask index to actual agent ID (skip ego agent)
+            agent_id = i if i < ego_agent_id else i + 1
+            if predicted_mask[i] > config.psn.mask_threshold:  # Threshold for selection
+                selected_agents.append(agent_id)
+                mask_values.append(predicted_mask[i])
+        
+        # Create agents and get their initial states
+        agents = []
+        initial_states = []
+        selected_targets = []
+        
+        # Cost function weights (same for all agents) - matching original ilqgames_example.py
+        Q = jnp.diag(jnp.array([0.1, 0.1, 0.001, 0.001]))  # State cost weights [x, y, vx, vy]
+        R = jnp.diag(jnp.array([0.01, 0.01]))               # Control cost weights [ax, ay]
+        
+        for agent_id in selected_agents:
+            # Create agent
+            agent = PointAgent(dt=dt, x_dim=4, u_dim=2, Q=Q, R=R)
+            agents.append(agent)
+            
+            # Initial state - convert 2D position to 4D state [x, y, vx, vy]
+            agent_key = f"agent_{agent_id}"
+            agent_states = sample_data["trajectories"][agent_key]["states"]
+            pos_2d = jnp.array(agent_states[0][:2])  # [x, y]
+            initial_state = jnp.array([pos_2d[0], pos_2d[1], 0.0, 0.0])  # [x, y, vx, vy]
+            initial_states.append(initial_state)
+            
+            # Use predicted goal position for this agent
+            selected_targets.append(predicted_goals[agent_id])
+        
+        return agents, initial_states, jnp.array(selected_targets), jnp.array(mask_values)
+
+def create_loss_functions(agents: list, mask_values=None, is_training: bool = True, reference_trajectories: list = None) -> tuple:
+    """
+    Create loss functions and their linearizations for all agents.
+    
+    During training: mask_values is the original mask array (only used by agent 0/ego agent)
+    During runtime: mask_values is a list of mask values for selected agents
+    
+    Args:
+        agents: List of agent objects
+        mask_values: Mask array (training) or mask list (runtime)
+        is_training: Whether this is for training or runtime
+        
+    Returns:
+        Tuple of (loss_functions, linearize_loss_functions, compiled_functions)
+    """
+    loss_functions = []
+    linearize_loss_functions = []
+    compiled_functions = []
+    
+    for i, agent in enumerate(agents):
+        # Create loss function for this agent
+        def create_runtime_loss(agent_idx, agent_obj, is_training=False):
+            def runtime_loss(xt, ut, goal_pos, other_states, mask_values, ref_traj=None):
+                # Navigation cost - follow reference trajectory if available, otherwise go to goal
+                if ref_traj is not None and len(ref_traj) > 0:
+                    # Use reference trajectory for navigation (like ilqgames_example.py)
+                    nav_loss = jnp.sum(jnp.square(xt[:2] - ref_traj[:2]))
+                # else:
+                #     # Fallback to goal-based navigation
+                #     nav_loss = jnp.sum(jnp.square(xt[:2] - goal_pos[:2]))
+                
+                # Collision avoidance costs with mask-based filtering
+                collision_loss = 0.0
+                if len(other_states) > 0 and mask_values is not None:
+                    if is_training:
+                        # Training: Only agent 0 (ego agent) uses the mask
+                        # Other agents have full interaction with ALL agents (including ego agent)
+                        other_positions = jnp.stack([other_xt[:2] for other_xt in other_states])
+                        distances_squared = jnp.sum(jnp.square(xt[:2] - other_positions), axis=1)
+                        
+                        # Base collision cost: using config values for consistency
+                        collision_weight = config.optimization.collision_weight
+                        collision_scale = config.optimization.collision_scale
+                        base_collision = collision_weight * jnp.exp(-collision_scale * distances_squared)
+                        
+                        if agent_idx == 0:  # Ego agent (agent 0)
+                            # Apply mask values to ego agent's interactions with other agents
+                            # mask_values contains [m_ego_1, m_ego_2, ..., m_ego_N-1]
+                            # other_states order: [agent_1, agent_2, ..., agent_N-1] (excluding ego)
+                            masked_collision = base_collision * mask_values[:len(other_states)]
+                        else:
+                            # Other agents: full interaction with ALL agents (including ego agent)
+                            # This means they consider collision costs with agent 0 and all other agents
+                            # No masking applied - they always consider full mutual costs
+                            masked_collision = base_collision
+                        
+                        collision_loss = jnp.sum(masked_collision)
+                    else:
+                        # Runtime: Use simple mask values for selected agents
+                        other_positions = jnp.stack([other_xt[:2] for other_xt in other_states])
+                        distances_squared = jnp.sum(jnp.square(xt[:2] - other_positions), axis=1)
+                        collision_weight = config.optimization.collision_weight
+                        collision_scale = config.optimization.collision_scale
+                        base_collision = collision_weight * jnp.exp(-collision_scale * distances_squared)
+                        masked_collision = base_collision * mask_values[:len(other_states)]
+                        collision_loss = jnp.sum(masked_collision) / (len(agents) - 1)
+                
+                # Control cost - using config values for consistency
+                ctrl_weight = config.optimization.control_weight
+                ctrl_loss = ctrl_weight * jnp.sum(jnp.square(ut))
+                
+                return nav_loss + collision_loss + ctrl_loss
+            
+            return runtime_loss
+        
+        # Get reference trajectory for this agent if available
+        ref_traj = None
+        if reference_trajectories is not None and i < len(reference_trajectories):
+            ref_traj = reference_trajectories[i]
+        
+        runtime_loss = create_runtime_loss(i, agent, is_training)
+        
+        # Create trajectory loss function
+        def trajectory_loss(x_traj, u_traj, goal_pos, other_x_trajs, mask_values):
+            def single_step_loss(args):
+                xt, ut, other_xts = args
+                return runtime_loss(xt, ut, goal_pos, other_xts, mask_values, ref_traj)
+            
+            loss_array = jax.vmap(single_step_loss)((x_traj, u_traj, other_x_trajs))
+            return loss_array.sum() * agent.dt
+        
+        # Create linearization function
+        def linearize_loss(x_traj, u_traj, goal_pos, other_x_trajs, mask_values):
+            dldx = jax.grad(runtime_loss, argnums=(0))
+            dldu = jax.grad(runtime_loss, argnums=(1))
+            
+            def grad_step(args):
+                xt, ut, other_xts = args
+                return dldx(xt, ut, goal_pos, other_xts, mask_values, ref_traj), dldu(xt, ut, goal_pos, other_xts, mask_values, ref_traj)
+            
+            grads = jax.vmap(grad_step)((x_traj, u_traj, other_x_trajs))
+            return grads[0], grads[1]  # a_traj, b_traj
+        
+        # Compile functions
+        compiled_loss = jax.jit(trajectory_loss)
+        compiled_linearize = jax.jit(linearize_loss)
+        compiled_linearize_dyn = jax.jit(agent.linearize_dyn)
+        compiled_solve = jax.jit(agent.solve)
+        
+        loss_functions.append(trajectory_loss)
+        linearize_loss_functions.append(linearize_loss)
+        compiled_functions.append({
+            'loss': compiled_loss,
+            'linearize_loss': compiled_linearize,
+            'linearize_dyn': compiled_linearize_dyn,
+            'solve': compiled_solve
+        })
+    
+    return loss_functions, linearize_loss_functions, compiled_functions
+
+def solve_masked_game_differentiable(agents: list, initial_states: list, target_positions: jnp.ndarray,
+                                   mask_values: jnp.ndarray = None, num_iters: int = 10, 
+                                   reference_trajectories: list = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Solve the masked game using a fully differentiable approach.
+    
+    This version ensures proper gradient flow through the entire game-solving pipeline
+    by using JAX-compatible operations throughout.
+    
+    Args:
+        agents: List of selected agents (used for configuration only)
+        initial_states: List of initial states for selected agents
+        target_positions: Target positions for selected agents
+        mask_values: Mask values for collision avoidance
+        num_iters: Number of optimization iterations
+        
+    Returns:
+        Tuple of (state_trajectories, control_trajectories)
+    """
+    n_selected = len(agents)
+    
+    # Convert lists to JAX arrays for better performance and differentiability
+    initial_states_array = jnp.stack([jnp.array(s) for s in initial_states])  # (n_selected, 4)
+    
+    # Create reference trajectories (EXACTLY like reference generation)
+    # Linear interpolation from initial position to target position
+    reference_trajectories = []
+    for i in range(n_selected):
+        start_pos = initial_states[i][:2]  # Extract x, y position
+        target_pos = target_positions[i]
+        # Linear interpolation over time steps (EXACTLY like reference generation)
+        ref_traj = jnp.linspace(start_pos, target_pos, T_total)
+        # Convert to full state trajectory [x, y, vx, vy]
+        ref_states = jnp.zeros((T_total, 4))
+        for t in range(T_total):
+            pos = ref_traj[t]
+            vel = (target_pos - start_pos) / (T_total * dt)  # Constant velocity
+            ref_states = ref_states.at[t, :].set(jnp.concatenate([pos, vel]))
+        reference_trajectories.append(ref_states)
+    
+    # Create goal trajectories for compatibility (not used in cost function anymore)
+    goal_trajectories = jnp.stack([
+        jnp.tile(target_positions[i], (T_total, 1))
+        for i in range(n_selected)
+    ])  # (n_selected, T_total, 2)
+    
+    # Initialize control trajectories
+    initial_controls = jnp.zeros((n_selected, T_total, 2))
+    
+    # Optimization parameters (following ilqgames_example.py pattern)
+    step_size = config.optimization.step_size  # Conservative step size similar to original
+    
+    # Use reasonable number of iterations for convergence
+    # training_iters = min(num_iters, config.optimization.num_iters)  # Reasonable iterations for stable convergence
+    training_iters = config.optimization.num_iters
+    
+    # Agent configuration (cost matrices) - matching original ilqgames_example.py
+    Q = jnp.diag(jnp.array([0.1, 0.1, 0.001, 0.001]))  # State cost weights [x, y, vx, vy]
+    R = jnp.diag(jnp.array([0.01, 0.01]))               # Control cost weights [ax, ay]
+    
+    def dynamics_function(x, u):
+        """Point mass dynamics: [x, y, vx, vy] with controls [ax, ay]"""
+        return jnp.array([
+            x[2],  # dx/dt = vx
+            x[3],  # dy/dt = vy  
+            u[0],  # dvx/dt = ax
+            u[1]   # dvy/dt = ay
+        ])
+    
+    def integrate_dynamics(x0, u_traj):
+        """Integrate dynamics forward using Euler integration"""
+        def step_fn(x, u):
+            x_next = x + dt * dynamics_function(x, u)
+            return x_next, x_next
+        
+        _, x_traj = jax.lax.scan(step_fn, x0, u_traj)
+        return x_traj
+    
+    def linearize_dynamics_at_trajectory(x0, u_traj):
+        """Linearize dynamics around a trajectory"""
+        x_traj = integrate_dynamics(x0, u_traj)
+        
+        # Compute Jacobians A = df/dx and B = df/du
+        def compute_jacobians(x, u):
+            A = jax.jacfwd(dynamics_function, argnums=0)(x, u)
+            B = jax.jacfwd(dynamics_function, argnums=1)(x, u)
+            return A, B
+        
+        A_traj, B_traj = jax.vmap(compute_jacobians)(x_traj, u_traj)
+        return x_traj, A_traj, B_traj
+    
+    def compute_cost_gradients(agent_idx, x_traj, u_traj, goal_traj, all_x_trajs, mask_values, ref_traj=None):
+        """Compute cost gradients for a single agent"""
+        def single_step_cost(x, u, goal_x, other_xs, ref_x=None):
+            # Navigation cost - track reference trajectory (EXACTLY like reference generation)
+            nav_cost = jnp.sum(jnp.square(x[:2] - ref_x[:2]))
+            
+            # Collision avoidance costs - exponential penalty for proximity to other agents
+            # (EXACTLY like reference generation) with proper masking
+            collision_cost = 0.0
+            
+            # Compute collision cost with each other agent
+            if other_xs.shape[0] > 0:
+                # other_xs contains the states of other agents at this timestep
+                # For agent_idx = 0 (ego), other agents are at indices [1, 2, ..., n-1] in the full game
+                # For agent_idx = i, other agents are at indices [0, 1, ..., i-1, i+1, ..., n-1]
+                
+                # Compute collision cost for each other agent
+                for i, other_x in enumerate(other_xs):
+                    distance_squared = jnp.sum(jnp.square(x[:2] - other_x[:2]))
+                    
+                    if agent_idx == 0:  # Ego agent
+                        # For ego agent, collision cost is weighted by the mask values of other agents
+                        # other_xs[i] corresponds to agent i+1, use mask index i
+                        mask_idx = i
+                        if mask_idx < len(mask_values):
+                            agent_mask_value = mask_values[mask_idx]
+                            collision_cost += config.optimization.collision_weight * agent_mask_value * jnp.exp(-config.optimization.collision_scale * distance_squared)
+                    else:  # Non-ego agent
+                        # For other agents, collision cost is always full (they're always "selected" when in the game)
+                        collision_cost += config.optimization.collision_weight * jnp.exp(-config.optimization.collision_scale * distance_squared)
+            
+            # Control cost - simplified without velocity scaling (EXACTLY like reference generation)
+            ctrl_cost = config.optimization.control_weight * jnp.sum(jnp.square(u))
+            
+            return nav_cost + collision_cost + ctrl_cost
+        
+        # Get other agents' trajectories (excluding current agent)
+        other_indices = jnp.array([i for i in range(n_selected) if i != agent_idx])
+        
+        if len(other_indices) > 0:
+            other_x_trajs = all_x_trajs[other_indices]
+        else:
+            other_x_trajs = jnp.zeros((0, T_total, 4))
+        
+        # Compute gradients w.r.t. state and control
+        if len(other_indices) > 0:
+            other_x_transposed = other_x_trajs.transpose(1, 0, 2)
+        else:
+            other_x_transposed = jnp.zeros((T_total, 0, 4))
+            
+        # Use the reference trajectory for this agent (created from goals)
+        ref_traj_array = reference_trajectories[agent_idx]
+        
+        a_traj = jax.vmap(jax.grad(single_step_cost, argnums=0))(
+            x_traj, u_traj, goal_traj, other_x_transposed, ref_traj_array)
+        b_traj = jax.vmap(jax.grad(single_step_cost, argnums=1))(
+            x_traj, u_traj, goal_traj, other_x_transposed, ref_traj_array)
+        
+        return a_traj, b_traj
+    
+    def solve_lqr_subproblem(A_traj, B_traj, a_traj, b_traj, agent):
+        """Solve LQR subproblem using proper iLQR solve method like ilqgames_example.py"""
+        # Use the agent's built-in solve method which implements the Riccati equation
+        v_traj, z_traj = agent.solve(A_traj, B_traj, a_traj, b_traj)
+        return v_traj
+    
+    def optimization_step(carry, _):
+        """Single optimization step - fully differentiable"""
+        control_trajectories = carry
+        
+        # Step 1: Linearize dynamics for all agents
+        x_trajs = []
+        A_trajs = []
+        B_trajs = []
+        
+        for i in range(n_selected):
+            x_traj, A_traj, B_traj = linearize_dynamics_at_trajectory(
+                initial_states_array[i], control_trajectories[i])
+            x_trajs.append(x_traj)
+            A_trajs.append(A_traj)
+            B_trajs.append(B_traj)
+        
+        x_trajs = jnp.stack(x_trajs)  # (n_selected, T_total, 4)
+        A_trajs = jnp.stack(A_trajs)  # (n_selected, T_total, 4, 4)
+        B_trajs = jnp.stack(B_trajs)  # (n_selected, T_total, 4, 2)
+        
+        # Step 2: Compute cost gradients for all agents
+        a_trajs = []
+        b_trajs = []
+        
+        for i in range(n_selected):
+            a_traj, b_traj = compute_cost_gradients(
+                i, x_trajs[i], control_trajectories[i], 
+                goal_trajectories[i], x_trajs, mask_values, None)  # ref_traj not used anymore
+            a_trajs.append(a_traj)
+            b_trajs.append(b_traj)
+        
+        a_trajs = jnp.stack(a_trajs)  # (n_selected, T_total, 4)
+        b_trajs = jnp.stack(b_trajs)  # (n_selected, T_total, 2)
+        
+        # Step 3: Solve LQR subproblems for all agents (like ilqgames_example.py)
+        control_updates = []
+        for i in range(n_selected):
+            v_traj = solve_lqr_subproblem(A_trajs[i], B_trajs[i], a_trajs[i], b_trajs[i], agents[i])
+            control_updates.append(v_traj)
+        
+        control_updates = jnp.stack(control_updates)  # (n_selected, T_total, 2)
+        
+        # Step 4: Update control trajectories
+        new_control_trajectories = control_trajectories + step_size * control_updates
+        
+        return new_control_trajectories, x_trajs
+    
+    # Use JAX scan for differentiable optimization
+    final_carry, scan_outputs = jax.lax.scan(
+        optimization_step, initial_controls, None, length=training_iters)
+    
+    # Get final results
+    final_control_trajectories = final_carry  # Final control trajectories
+    final_state_trajectories = scan_outputs[-1]  # Last state trajectories
+    
+    # Convert back to list format for compatibility
+    final_state_list = [final_state_trajectories[i] for i in range(n_selected)]
+    final_control_list = [final_control_trajectories[i] for i in range(n_selected)]
+    
+    return final_state_list, final_control_list
+
+
+def solve_masked_game(agents: list, initial_states: list, target_positions: jnp.ndarray,
+                     compiled_functions: list, mask_values: jnp.ndarray = None, num_iters: int = 10, 
+                     reference_trajectories: list = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Wrapper function that calls the differentiable game solver.
+    
+    This maintains compatibility with the existing API while using the new
+    fully differentiable implementation.
+    
+    Args:
+        agents: List of agent objects
+        initial_states: Initial states for each agent
+        target_positions: Target positions for each agent
+        compiled_functions: Compiled functions for loss computation
+        mask_values: Mask values for agent selection
+        num_iters: Number of iterations for solver
+        reference_trajectories: Reference trajectories for navigation (optional)
+    """
+    return solve_masked_game_differentiable(agents, initial_states, target_positions, mask_values, num_iters, reference_trajectories)
+
+def extract_ego_reference_trajectory(sample_data: Dict[str, Any], ego_agent_id: int) -> jnp.ndarray:
+    """
+    Extract reference trajectory for the ego agent.
+    
+    Args:
+        sample_data: Reference trajectory sample
+        ego_agent_id: ID of the ego agent
+        
+    Returns:
+        Reference trajectory for ego agent (T_reference, state_dim)
+    """
+    ego_key = f"agent_{ego_agent_id}"
+    ego_states = sample_data["trajectories"][ego_key]["states"]
+    return jnp.array(ego_states)
+
+def ego_agent_game_cost(ego_state_traj: jnp.ndarray, ego_control_traj: jnp.ndarray, 
+                       other_agents_trajs: List[jnp.ndarray], mask_values: jnp.ndarray,
+                       ref_traj: jnp.ndarray, apply_masks: bool = True) -> jnp.ndarray:
+    """
+    Compute the ego agent's total game cost.
+    
+    This function computes the total cost for the ego agent in the masked game,
+    which includes navigation cost (tracking reference trajectory), collision 
+    avoidance cost (with other agents, weighted by mask values), and control cost.
+    
+    Args:
+        ego_state_traj: Ego agent's state trajectory (T_total, state_dim)
+        ego_control_traj: Ego agent's control trajectory (T_total, control_dim)
+        other_agents_trajs: List of other agents' state trajectories
+        mask_values: Mask values for collision avoidance with other agents
+        ref_traj: Reference trajectory for navigation (T_total, state_dim)
+        
+    Returns:
+        Total game cost for the ego agent
+    """
+    T_total = ego_state_traj.shape[0]
+    
+    def single_step_cost(t):
+        """Compute cost for a single timestep"""
+        ego_state = ego_state_traj[t]  # (state_dim,)
+        ego_control = ego_control_traj[t]  # (control_dim,)
+        ref_state = ref_traj[t]  # (state_dim,)
+        
+        # Navigation cost - track reference trajectory
+        nav_cost = jnp.sum(jnp.square(ego_state[:2] - ref_state[:2]))
+        
+        # Collision avoidance cost with other agents (weighted by mask values)
+        collision_cost = 0.0
+        if len(other_agents_trajs) > 0:
+            ego_pos = ego_state[:2]  # (2,)
+            
+            for i, other_traj in enumerate(other_agents_trajs):
+                if i < len(mask_values):
+                    other_state = other_traj[t]  # (state_dim,)
+                    other_pos = other_state[:2]  # (2,)
+                    
+                    # Distance squared between ego and other agent
+                    distance_squared = jnp.sum(jnp.square(ego_pos - other_pos))
+                    
+                    # Collision cost - conditionally apply mask based on context
+                    if apply_masks:
+                        # Game solving: apply mask values
+                        mask_value = mask_values[i]
+                        collision_cost += (config.optimization.collision_weight * 
+                                         mask_value * 
+                                         jnp.exp(-config.optimization.collision_scale * distance_squared))
+                    else:
+                        # Training loss: do not apply mask values
+                        collision_cost += (config.optimization.collision_weight * 
+                                         jnp.exp(-config.optimization.collision_scale * distance_squared))
+        
+        # Control cost - penalty on control effort
+        ctrl_cost = config.optimization.control_weight * jnp.sum(jnp.square(ego_control))
+        
+        return nav_cost + collision_cost + ctrl_cost
+    
+    # Compute cost for all timesteps
+    costs = jax.vmap(single_step_cost)(jnp.arange(T_total))
+    
+    # Return total cost (sum over time, scaled by dt)
+    return jnp.sum(costs) * dt
+
+
+def _observations_to_initial_states(obs_row: jnp.ndarray, obs_input_type: str = "full") -> jnp.ndarray:
+    """Convert a flattened observations row into initial 4D states for each agent.
+    obs_row: shape (T_observation * N_agents * obs_dim,)
+    returns: (N_agents, 4)
+    """
+    # Determine observation dimension based on input type
+    obs_dim = 2 if obs_input_type == "partial" else 4
+    
+    traj = obs_row.reshape(T_observation, N_agents, obs_dim)
+    first = traj[0]  # (N_agents, obs_dim)
+    
+    if obs_input_type == "partial":
+        # For partial observations, we only have position (x, y)
+        # Set velocity to zero
+        pos = first[:, :2]  # (N_agents, 2)
+        vel = jnp.zeros((N_agents, 2))  # (N_agents, 2) - zero velocity
+        return jnp.concatenate([pos, vel], axis=-1)
+    else:
+        # For full observations, we have position and velocity
+        pos = first[:, :2]
+        vel = first[:, 2:4]
+        return jnp.concatenate([pos, vel], axis=-1)
+
+def compute_ego_agent_cost_from_arrays(agents: list,
+                                       initial_states: jnp.ndarray,
+                                       predicted_goals_row: jnp.ndarray,
+                                       predicted_mask_row: jnp.ndarray,
+                                       ref_ego_traj: jnp.ndarray,
+                                       ref_other_trajs: jnp.ndarray,
+                                       apply_masks: bool = True) -> jnp.ndarray:
+    """Fully-JAX ego agent cost using arrays only (no Python dict access).
+    - initial_states: (N_agents, 4)
+    - predicted_goals_row: (N_agents * 2,) or (N_agents, 2)
+    - predicted_mask_row: (N_agents - 1,)
+    - ref_ego_traj: (T_reference, state_dim)
+    - ref_other_trajs: Reference trajectories for other agents (N_agents-1, T_reference, state_dim)
+    """
+    targets = predicted_goals_row.reshape(N_agents, 2)
+    mask_values = predicted_mask_row
+
+    # Solve the full masked game with all agents to get realistic multi-agent dynamics
+    # This ensures the ego agent cost reflects actual game performance, not single-agent optimization
+    
+    # Convert initial states to list format for game solving
+    initial_states_list = [initial_states[i] for i in range(N_agents)]
+    
+    # Solve the masked game with all agents
+    game_state_trajs, game_control_trajs = solve_masked_game_differentiable(
+        agents, initial_states_list, targets, mask_values, 
+        num_iters=config.optimization.num_iters, reference_trajectories=None
+    )
+    
+    # Extract ego agent's trajectory from the game results
+    ego_state_traj = game_state_trajs[0]  # Ego agent is always agent 0
+    ego_control_traj = game_control_trajs[0]
+    
+    # Extract other agents' trajectories from the game results
+    other_agents_trajs = game_state_trajs[1:]  # All agents except ego agent
+    
+    # Compute ego agent's total game cost using actual game results
+    return ego_agent_game_cost(ego_state_traj, ego_control_traj, other_agents_trajs, mask_values, ref_ego_traj, apply_masks)
+
+def compute_batch_ego_agent_cost(predicted_masks: jnp.ndarray,
+                                 predicted_goals: jnp.ndarray,
+                                 batch_data: List[Dict[str, Any]],
+                                 ego_agent_id: int = 0,
+                                 cost_pbar: tqdm = None,
+                                 obs_input_type: str = "full",
+                                 apply_masks: bool = True) -> jnp.ndarray:
+    """
+    Compute ego agent cost for a batch of samples by solving masked games.
+    
+    Args:
+        predicted_masks: Predicted masks from PSN (batch_size, N_agents - 1)
+        predicted_goals: Predicted goals from pretrained network (batch_size, N_agents * 2)
+        batch_data: List of reference trajectory samples
+        ego_agent_id: ID of the ego agent
+        cost_pbar: Optional progress bar for cost computation
+        
+    Returns:
+        Average ego agent cost for the batch
+    """
+    # Build shared agents once (purely static configuration) - matching original ilqgames_example.py
+    Q = jnp.diag(jnp.array([0.1, 0.1, 0.001, 0.001]))  # State cost weights [x, y, vx, vy]
+    R = jnp.diag(jnp.array([0.01, 0.01]))               # Control cost weights [ax, ay]
+    shared_agents = [PointAgent(dt=dt, x_dim=4, u_dim=2, Q=Q, R=R) for _ in range(N_agents)]
+
+    # To force a JAX path, construct needed arrays from batch_data using helper
+    # Extract observations and ref trajectories via existing helpers
+    observations, _, ref_trajs, all_agents_ref_trajs = prepare_batch_for_training(batch_data, obs_input_type)
+
+    # Convert all_agents_ref_trajs to JAX arrays for vmap compatibility
+    # all_agents_ref_trajs is a list of lists, convert to a 3D array
+    batch_size = len(all_agents_ref_trajs)
+    all_agents_ref_array = jnp.stack([
+        jnp.stack([all_agents_ref_trajs[i][j] for j in range(N_agents)]) 
+        for i in range(batch_size)
+    ])  # Shape: (batch_size, N_agents, T_reference, state_dim)
+
+    def per_sample(i):
+        mask = predicted_masks[i]
+        goals = predicted_goals[i]
+        obs_row = observations[i]
+        ref_ego = ref_trajs[i]
+        ref_other = all_agents_ref_array[i, 1:, :, :]  # Exclude ego agent (agent 0), shape: (N_agents-1, T_reference, state_dim)
+        init_states = _observations_to_initial_states(obs_row, obs_input_type)
+        return compute_ego_agent_cost_from_arrays(shared_agents, init_states, goals, mask, ref_ego, ref_other, apply_masks)
+
+    valid_bs = min(predicted_masks.shape[0], observations.shape[0])
+    costs = jax.vmap(per_sample)(jnp.arange(valid_bs))
+    return jnp.mean(costs)
+
+def prepare_batch_for_training(batch_data: List[Dict[str, Any]], obs_input_type: str = "full") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, List[List[jnp.ndarray]]]:
+    """
+    Prepare batch data for training.
+    
+    Args:
+        batch_data: List of reference trajectory samples
+        obs_input_type: Observation input type ["full", "partial"]
+        
+    Returns:
+        observations: Batch of observations 
+            - If obs_input_type="full": (batch_size, T_observation * N_agents * 4)
+            - If obs_input_type="partial": (batch_size, T_observation * N_agents * 2)
+        masks: Batch of masks (batch_size, N_agents - 1)
+        reference_trajectories: Batch of ego reference trajectories (batch_size, T_reference, state_dim)
+        all_agents_ref_trajs: List of reference trajectories for all agents (batch_size, List of N_agents trajectories)
+    """
+    # Determine observation dimensions based on input type
+    if obs_input_type == "partial":
+        obs_dim = 2  # Only position (x, y)
+    else:  # "full"
+        obs_dim = 4  # Full state (x, y, vx, vy)
+    
+    batch_obs = []
+    batch_masks = []
+    batch_ref_traj = []
+    batch_all_agents_ref_trajs = []
+    
+    for sample_data in batch_data:
+        ego_agent_id = 0
+        
+        # Extract observation trajectory
+        obs_traj = extract_observation_trajectory(sample_data, obs_input_type)
+        batch_obs.append(obs_traj.flatten())
+        
+        # Extract reference trajectories for all agents
+        all_agents_ref_trajs = []
+        for agent_id in range(N_agents):
+            agent_key = f"agent_{agent_id}"
+            agent_states = sample_data["trajectories"][agent_key]["states"]
+            agent_ref_traj = jnp.array(agent_states)
+            
+            # Ensure trajectory has correct length
+            if agent_ref_traj.shape[0] != T_reference:
+                if agent_ref_traj.shape[0] < T_reference:
+                    pad_size = T_reference - agent_ref_traj.shape[0]
+                    last_state = agent_ref_traj[-1:]
+                    padding = jnp.tile(last_state, (pad_size, 1))
+                    agent_ref_traj = jnp.concatenate([agent_ref_traj, padding], axis=0)
+                else:
+                    agent_ref_traj = agent_ref_traj[:T_reference]
+            
+            all_agents_ref_trajs.append(agent_ref_traj)
+        
+        # Extract ego reference trajectory (for backward compatibility)
+        ego_ref_traj = all_agents_ref_trajs[ego_agent_id]
+        batch_ref_traj.append(ego_ref_traj)
+        batch_all_agents_ref_trajs.append(all_agents_ref_trajs)
+        
+        # For validation, we don't need masks since PSN will predict them
+        # For training, this will be replaced by PSN prediction anyway
+        # So we can just use zeros as placeholders
+        placeholder_mask = jnp.zeros((N_agents - 1,))
+        batch_masks.append(placeholder_mask)
+    
+    # Pad batch if necessary
+    if len(batch_obs) < batch_size:
+        pad_size = batch_size - len(batch_obs)
+        obs_pad = jnp.zeros((pad_size, T_observation * N_agents * obs_dim))
+        batch_obs.extend([obs_pad[i] for i in range(pad_size)])
+        mask_pad = jnp.zeros((pad_size, N_agents - 1))
+        batch_masks.extend([mask_pad[i] for i in range(pad_size)])
+        ref_pad = jnp.zeros((pad_size, T_reference, state_dim))
+        batch_ref_traj.extend([ref_pad[i] for i in range(pad_size)])
+        
+        # Pad all agents reference trajectories
+        all_agents_pad = []
+        for _ in range(pad_size):
+            agent_pad = [jnp.zeros((T_reference, state_dim)) for _ in range(N_agents)]
+            all_agents_pad.append(agent_pad)
+        batch_all_agents_ref_trajs.extend(all_agents_pad)
+    
+    # Convert to JAX arrays
+    batch_obs = jnp.stack(batch_obs)
+    batch_masks = jnp.stack(batch_masks)
+    batch_ref_traj = jnp.stack(batch_ref_traj)
+    
+    return batch_obs, batch_masks, batch_ref_traj, batch_all_agents_ref_trajs
+
+def prepare_batch_for_training_with_progress(batch_data: List[Dict[str, Any]], sample_pbar: tqdm, obs_input_type: str = "full") -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, List[List[jnp.ndarray]]]:
+    """
+    Prepare batch data for training with a progress bar for samples.
+    
+    Args:
+        batch_data: List of reference trajectory samples
+        sample_pbar: tqdm progress bar for samples
+        obs_input_type: Observation input type ["full", "partial"]
+        
+    Returns:
+        observations: Batch of observations 
+            - If obs_input_type="full": (batch_size, T_observation * N_agents * 4)
+            - If obs_input_type="partial": (batch_size, T_observation * N_agents * 2)
+        masks: Batch of masks (batch_size, N_agents - 1)
+        reference_trajectories: Batch of ego reference trajectories (batch_size, T_reference, state_dim)
+        all_agents_ref_trajs: List of reference trajectories for all agents (batch_size, List of N_agents trajectories)
+    """
+    # Determine observation dimensions based on input type
+    if obs_input_type == "partial":
+        obs_dim = 2  # Only position (x, y)
+    else:  # "full"
+        obs_dim = 4  # Full state (x, y, vx, vy)
+    
+    batch_obs = []
+    batch_masks = []
+    batch_ref_traj = []
+    batch_all_agents_ref_trajs = []
+    
+    for i, sample_data in enumerate(batch_data):
+        ego_agent_id = 0
+        
+        # Extract observation trajectory
+        obs_traj = extract_observation_trajectory(sample_data, obs_input_type)
+        batch_obs.append(obs_traj.flatten())
+        
+        # Extract reference trajectories for all agents
+        all_agents_ref_trajs = []
+        for agent_id in range(N_agents):
+            agent_key = f"agent_{agent_id}"
+            agent_states = sample_data["trajectories"][agent_key]["states"]
+            agent_ref_traj = jnp.array(agent_states)
+            
+            # Ensure trajectory has correct length
+            if agent_ref_traj.shape[0] != T_reference:
+                if agent_ref_traj.shape[0] < T_reference:
+                    pad_size = T_reference - agent_ref_traj.shape[0]
+                    last_state = agent_ref_traj[-1:]
+                    padding = jnp.tile(last_state, (pad_size, 1))
+                    agent_ref_traj = jnp.concatenate([agent_ref_traj, padding], axis=0)
+                else:
+                    agent_ref_traj = agent_ref_traj[:T_reference]
+            
+            all_agents_ref_trajs.append(agent_ref_traj)
+        
+        # Extract ego reference trajectory (for backward compatibility)
+        ego_ref_traj = all_agents_ref_trajs[ego_agent_id]
+        batch_ref_traj.append(ego_ref_traj)
+        batch_all_agents_ref_trajs.append(all_agents_ref_trajs)
+        
+        # For training, this will be replaced by PSN prediction anyway
+        # So we can just use zeros as placeholders
+        placeholder_mask = jnp.zeros((N_agents - 1,))
+        batch_masks.append(placeholder_mask)
+        
+        # Update sample progress bar
+        sample_pbar.set_postfix({'Sample': f'{i+1}/{len(batch_data)}'})
+        sample_pbar.update(1)
+    
+    # Pad batch if necessary
+    if len(batch_obs) < batch_size:
+        pad_size = batch_size - len(batch_obs)
+        obs_pad = jnp.zeros((pad_size, T_observation * N_agents * obs_dim))
+        batch_obs.extend([obs_pad[i] for i in range(pad_size)])
+        mask_pad = jnp.zeros((pad_size, N_agents - 1))
+        batch_masks.extend([mask_pad[i] for i in range(pad_size)])
+        ref_pad = jnp.zeros((pad_size, T_reference, state_dim))
+        batch_ref_traj.extend([ref_pad[i] for i in range(pad_size)])
+        
+        # Pad all agents reference trajectories
+        all_agents_pad = []
+        for _ in range(pad_size):
+            agent_pad = [jnp.zeros((T_reference, state_dim)) for _ in range(N_agents)]
+            all_agents_pad.append(agent_pad)
+        batch_all_agents_ref_trajs.extend(all_agents_pad)
+    
+    # Convert to JAX arrays
+    batch_obs = jnp.stack(batch_obs)
+    batch_masks = jnp.stack(batch_masks)
+    batch_ref_traj = jnp.stack(batch_ref_traj)
+    
+    return batch_obs, batch_masks, batch_ref_traj, batch_all_agents_ref_trajs
+
+# ============================================================================
+# LOSS FUNCTIONS
+# ============================================================================
+
+def binary_loss(mask: jnp.ndarray) -> jnp.ndarray:
+    """Binary loss: encourages mask values to be close to 0 or 1."""
+    binary_penalty = mask * (1 - mask)
+    return jnp.mean(binary_penalty)
+
+def mask_sparsity_loss(mask: jnp.ndarray) -> jnp.ndarray:
+    """Mask sparsity loss: encourages fewer agents to be selected."""
+    return jnp.mean(mask)
+
+def total_loss(mask: jnp.ndarray, binary_loss_val: jnp.ndarray, 
+               sparsity_loss_val: jnp.ndarray, ego_agent_cost_val: jnp.ndarray,
+               sigma1: float = 0.1, sigma2: float = 1.0) -> jnp.ndarray:
+    """Total loss combining all components."""
+    return ego_agent_cost_val + sigma1 * sparsity_loss_val + sigma2 * binary_loss_val
+
+# ============================================================================
+# GOAL INFERENCE INTEGRATION
+# ============================================================================
+
+def load_pretrained_goal_model(model_path: str, obs_input_type: str = "full") -> Tuple[GoalInferenceNetwork, train_state.TrainState]:
+    """Load the pretrained goal inference model."""
+    print(f"Loading pretrained goal inference model from: {model_path}")
+    
+    # Create model instance
+    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims, obs_input_type=obs_input_type)
+    
+    # Load trained parameters
+    with open(model_path, 'rb') as f:
+        model_bytes = pickle.load(f)
+    
+    # Recreate train state
+    optimizer = optax.adamw(learning_rate=config.goal_inference.learning_rate, weight_decay=5e-4)  # Dummy optimizer for inference
+    obs_dim = 2 if obs_input_type == "partial" else 4
+    input_shape = (1, T_observation * N_agents * obs_dim)
+    dummy_state = create_train_state(goal_model, optimizer, input_shape, jax.random.PRNGKey(config.training.seed))
+    
+    # Load parameters
+    trained_state = dummy_state.replace(params=flax.serialization.from_bytes(dummy_state, model_bytes).params)
+    
+    print("Pretrained goal inference model loaded successfully")
+    return goal_model, trained_state
+
+def predict_goals_with_pretrained_model(goal_model: GoalInferenceNetwork, 
+                                       trained_state: train_state.TrainState,
+                                       observations: jnp.ndarray, rng: jnp.ndarray = None) -> jnp.ndarray:
+    """Use pretrained goal inference model to predict goals."""
+    if rng is not None:
+        # Training mode: use dropout with random key
+        return trained_state.apply_fn({'params': trained_state.params}, observations, rngs={'dropout': rng}, deterministic=False)
+    else:
+        # Evaluation mode: deterministic (no dropout)
+        return trained_state.apply_fn({'params': trained_state.params}, observations, deterministic=True)
+
+# ============================================================================
+# REFERENCE TRAJECTORY LOADING
+# ============================================================================
+
+def load_reference_trajectories(data_dir: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load reference trajectories from directory containing individual JSON files and split into training and validation sets."""
+    import glob
+    
+    # Find all ref_traj_sample_*.json files in the directory
+    pattern = os.path.join(data_dir, "ref_traj_sample_*.json")
+    json_files = sorted(glob.glob(pattern))
+    
+    if not json_files:
+        raise FileNotFoundError(f"No ref_traj_sample_*.json files found in directory: {data_dir}")
+    
+    # Load all samples
+    reference_data = []
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                sample_data = json.load(f)
+                reference_data.append(sample_data)
+        except Exception as e:
+            print(f"Warning: Failed to load {json_file}: {e}")
+            continue
+    
+    print(f"Loaded {len(reference_data)} reference trajectory samples from {data_dir}")
+    print(f"Sample files: {len(json_files)} found, {len(reference_data)} loaded successfully")
+    
+    # Split data: Load from config
+    total_samples = len(reference_data)
+    train_size = config.training.train_samples
+    val_size = config.training.test_samples
+    
+    # Check if we have enough samples
+    if total_samples < train_size + val_size:
+        print(f"Warning: Only {total_samples} samples available, but need {train_size + val_size} samples")
+        print(f"Using all available samples: {total_samples} for training, 0 for validation")
+        training_data = reference_data
+        validation_data = []
+    else:
+        # Use first 384 samples for training, later 128 samples for testing
+        # Sort by sample_id to ensure consistent ordering
+        reference_data.sort(key=lambda x: x.get('sample_id', 0))
+        
+        training_data = reference_data[:train_size]
+        validation_data = reference_data[train_size:train_size + val_size]
+    
+    print(f"Training samples: {len(training_data)} (first {len(training_data)} samples)")
+    print(f"Validation samples: {len(validation_data)} (samples {len(training_data)} to {len(training_data) + len(validation_data) - 1})")
+    
+    return training_data, validation_data
+
+# ============================================================================
+# MASKED GAME FUNCTIONS
+# ============================================================================
+
+# The create_masked_game_setup, create_loss_functions, solve_masked_game,
+# extract_ego_reference_trajectory, ego_agent_game_cost, compute_ego_agent_cost_from_arrays,
+# and compute_batch_ego_agent_cost functions are now defined above.
+
+# ============================================================================
+# TRAINING FUNCTIONS
+# ============================================================================
+
+def create_train_state(model: nn.Module, optimizer: optax.GradientTransformation, 
+                      input_shape: Tuple[int, ...], rng: jnp.ndarray) -> train_state.TrainState:
+    """Create training state for the model."""
+    dummy_input = jnp.ones(input_shape)
+    variables = model.init(rng, dummy_input)
+    params = variables['params']
+    
+    state = train_state.TrainState.create(
+        apply_fn=model.apply,
+        params=params,
+        tx=optimizer
+    )
+    
+    return state
+
+def train_step(state: train_state.TrainState, batch: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, List[List[jnp.ndarray]]],
+               batch_data: List[Dict[str, Any]], goal_model: Optional[GoalInferenceNetwork],
+               goal_trained_state: Optional[train_state.TrainState], sigma1: float, sigma2: float,
+               use_true_goals: bool = False, rng: jnp.ndarray = None, cost_pbar: tqdm = None,
+               obs_input_type: str = "full") -> Tuple[train_state.TrainState, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]]:
+    """
+    Single training step with game-solving loss function.
+    
+    Uses differentiable iLQR-based game solver for proper gradient flow.
+    """
+    observations, masks, reference_trajectories, all_agents_ref_trajs = batch
+    
+    def loss_fn(params):
+        # Get predicted mask from PSN (training mode with dropout)
+        predicted_masks = state.apply_fn({'params': params}, observations, rngs={'dropout': rng}, deterministic=False)
+        
+        # Get goals based on configuration
+        if use_true_goals:
+            # Extract true goals from reference data
+            predicted_goals = extract_true_goals_from_batch(batch_data)
+        else:
+            # Get predicted goals from pretrained goal inference network
+            predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations, rng)
+        
+        # 1. Binary loss: encourages mask values to be close to 0 or 1
+        binary_loss_val = binary_loss(predicted_masks)
+        
+        # 2. Sparsity loss: encourages fewer agents to be selected
+        sparsity_loss_val = mask_sparsity_loss(predicted_masks)
+        
+        # 3. Ego agent game cost: solve masked game and compute ego agent's total cost
+        # For training loss, do not apply masks to collision costs
+        ego_agent_cost_val = compute_batch_ego_agent_cost(predicted_masks, predicted_goals, batch_data, ego_agent_id=0, cost_pbar=cost_pbar, obs_input_type=obs_input_type, apply_masks=False)
+        
+        # Total loss combining all components
+        total_loss_val = total_loss(predicted_masks, binary_loss_val, 
+                                  sparsity_loss_val, ego_agent_cost_val,
+                                  sigma1, sigma2)
+        
+        return total_loss_val, (binary_loss_val, sparsity_loss_val, ego_agent_cost_val)
+    
+    # Compute gradients using JAX automatic differentiation
+    (loss, loss_components), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+    
+    # Apply gradient clipping to prevent gradient explosion
+    grad_norm = jax.tree.reduce(lambda x, y: x + jnp.sum(jnp.square(y)), grads, initializer=0.0)
+    grad_norm = jnp.sqrt(grad_norm)
+    
+    max_grad_norm = config.debug.gradient_clip_value
+    if grad_norm > max_grad_norm:
+        scale = max_grad_norm / grad_norm
+        grads = jax.tree.map(lambda g: g * scale, grads)
+    
+    # Apply gradients using the optimizer
+    state = state.apply_gradients(grads=grads)
+    
+    return state, loss, loss_components
+
+def validation_step(state: train_state.TrainState, validation_data: List[Dict[str, Any]],
+                   goal_model: Optional[GoalInferenceNetwork], goal_trained_state: Optional[train_state.TrainState],
+                   batch_size: int = 32, ego_agent_id: int = 0, use_true_goals: bool = False, obs_input_type: str = "full") -> Tuple[float, float, float, float, List[jnp.ndarray]]:
+    """
+    Perform validation on the validation dataset.
+    
+    Args:
+        state: Current train state
+        validation_data: Validation dataset
+        goal_model: Pretrained goal inference network
+        goal_trained_state: Trained state of goal inference network
+        batch_size: Batch size for validation
+        ego_agent_id: ID of the ego agent
+        
+    Returns:
+        Tuple of (average validation loss, average binary loss, average sparsity loss, average ego agent cost, list of predicted masks)
+    """
+    val_losses = []
+    val_binary_losses = []
+    val_sparsity_losses = []
+    val_ego_agent_costs = []
+    all_predicted_masks = []
+    
+    # Create validation batches
+    num_val_batches = (len(validation_data) + batch_size - 1) // batch_size
+    
+    for batch_idx in range(num_val_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, len(validation_data))
+        batch_data = validation_data[start_idx:end_idx]
+        
+        # Prepare batch for validation
+        observations, masks, reference_trajectories, all_agents_ref_trajs = prepare_batch_for_training(batch_data, obs_input_type)
+        
+        # Get predicted mask from PSN (validation mode, no dropout)
+        predicted_masks = state.apply_fn({'params': state.params}, observations, deterministic=True)
+        
+        # Store masks for analysis
+        all_predicted_masks.append(predicted_masks)
+        
+        # Get goals based on configuration
+        if use_true_goals:
+            # Extract true goals from reference data
+            predicted_goals = extract_true_goals_from_batch(batch_data)
+        else:
+            # Get predicted goals from pretrained goal inference network
+            predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations)
+        
+        # Compute validation loss components
+        binary_loss_val = binary_loss(predicted_masks)
+        sparsity_loss_val = mask_sparsity_loss(predicted_masks)
+        
+        # Compute ego agent cost using game solving
+        # For validation loss, do not apply masks to collision costs (same as training)
+        ego_agent_cost_val = compute_batch_ego_agent_cost(predicted_masks, predicted_goals, batch_data, ego_agent_id, apply_masks=False)
+        
+        # Total validation loss (same as training loss for fair comparison)
+        total_loss_val = total_loss(predicted_masks, binary_loss_val, 
+                                  sparsity_loss_val, ego_agent_cost_val,
+                                  sigma1, sigma2)  # Same loss function as training
+
+        val_losses.append(float(total_loss_val))
+        val_binary_losses.append(float(binary_loss_val))
+        val_sparsity_losses.append(float(sparsity_loss_val))
+        val_ego_agent_costs.append(float(ego_agent_cost_val))
+    
+    avg_val_loss = sum(val_losses) / len(val_losses)
+    avg_val_binary = sum(val_binary_losses) / len(val_binary_losses)
+    avg_val_sparsity = sum(val_sparsity_losses) / len(val_sparsity_losses)
+    avg_val_ego_agent_cost = sum(val_ego_agent_costs) / len(val_ego_agent_costs)
+
+    return avg_val_loss, avg_val_binary, avg_val_sparsity, avg_val_ego_agent_cost, all_predicted_masks
+
+# ============================================================================
+# DEBUG FUNCTIONS
+# ============================================================================
+
+def test_gradient_flow(state: train_state.TrainState, observations: jnp.ndarray, 
+                      goal_model: GoalInferenceNetwork, goal_trained_state: train_state.TrainState,
+                      reference_trajectories: jnp.ndarray) -> bool:
+    """
+    Test if gradients are flowing correctly through the game-solving loss function.
+    
+    Args:
+        state: Current train state
+        observations: Input observations
+        goal_model: Goal inference model
+        goal_trained_state: Trained goal inference state
+        reference_trajectories: Reference trajectories for loss computation
+        
+    Returns:
+        True if gradients are non-zero, False otherwise
+    """
+    print("\n" + "="*60)
+    print("TESTING GRADIENT FLOW WITH DIFFERENTIABLE GAME SOLVER")
+    print("="*60)
+    
+    def test_loss_fn(params):
+        # Get predicted mask from PSN (deterministic mode for testing)
+        predicted_masks = state.apply_fn({'params': params}, observations, deterministic=True)
+        
+        # Get predicted goals from pretrained goal inference network
+        predicted_goals = predict_goals_with_pretrained_model(goal_model, goal_trained_state, observations)
+        
+        # Test the actual game-solving loss components
+        binary_loss_val = binary_loss(predicted_masks)
+        sparsity_loss_val = mask_sparsity_loss(predicted_masks)
+        
+        # Create a complete test batch_data for game solving
+        # This will test if the new differentiable game-solving pipeline produces gradients
+        test_trajectories = {}
+        for agent_id in range(N_agents):
+            agent_key = f"agent_{agent_id}"
+            # Create dummy trajectory data for testing
+            dummy_states = jnp.zeros((T_reference, state_dim))
+            dummy_states = dummy_states.at[:, :2].set(reference_trajectories[0, :T_reference, :2])  # Use reference positions
+            test_trajectories[agent_key] = {"states": dummy_states}
+        
+        test_batch_data = [{"trajectories": test_trajectories}]
+        
+        # Test ego agent cost using the new differentiable approach
+        # For testing, use apply_masks=True to test game solving functionality
+        ego_agent_cost_val = compute_batch_ego_agent_cost(predicted_masks, predicted_goals, test_batch_data, apply_masks=True)
+        
+        total_loss_val = binary_loss_val + sparsity_loss_val + ego_agent_cost_val
+        
+        return total_loss_val, (binary_loss_val, sparsity_loss_val, ego_agent_cost_val)
+    
+    # Compute gradients
+    (loss, loss_components), grads = jax.value_and_grad(test_loss_fn, has_aux=True)(state.params)
+    
+    # Check gradient norm
+    grad_norm = jax.tree.reduce(lambda x, y: x + jnp.sum(jnp.square(y)), grads, initializer=0.0)
+    grad_norm = jnp.sqrt(grad_norm)
+    
+    print(f"Test loss: {float(loss):.6f}")
+    print(f"Loss components:")
+    print(f"  Binary: {float(loss_components[0]):.6f}")
+    print(f"  Sparsity: {float(loss_components[1]):.6f}")
+    print(f"  Ego Agent Cost: {float(loss_components[2]):.6f}")
+    print(f"Gradient norm: {float(grad_norm):.8f}")
+    
+    if grad_norm > 1e-8:
+        print("✓ GRADIENTS ARE FLOWING CORRECTLY WITH DIFFERENTIABLE GAME SOLVER!")
+        print("✓ The new implementation should enable proper backpropagation through masks.")
+        return True
+    else:
+        print("✗ GRADIENTS ARE STILL ZERO - NEED FURTHER DEBUGGING!")
+        print("The issue might be in the differentiable game solver implementation.")
+        return False
+
+# ============================================================================
+# ENHANCED TRAINING FUNCTIONS
+# ============================================================================
+
+def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[str, Any]], 
+                                   validation_data: List[Dict[str, Any]], goal_model: Optional[GoalInferenceNetwork], 
+                                   goal_trained_state: Optional[train_state.TrainState],
+                                   num_epochs: int = 30, learning_rate: float = 1e-3,
+                                   sigma1: float = 0.1, sigma2: float = 0.0, batch_size: int = 32, 
+                                   use_true_goals: bool = False, rng: jnp.ndarray = None,
+                                   obs_input_type: str = "full") -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float], List[float], train_state.TrainState, str, float, int]:
+    """Train PSN using pretrained goal inference network with validation."""
+    if rng is None:
+        rng = jax.random.PRNGKey(config.training.seed)
+    
+    # Create log directory and TensorBoard writer
+    # Extract goal inference model name from the path
+    goal_model_dir = os.path.dirname(pretrained_goal_model_path)
+    goal_model_name = os.path.basename(goal_model_dir)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Determine directory structure based on goal source
+    if use_true_goals:
+        # When using true goals, save under a separate "goal_true" directory
+        goal_true_dir = os.path.join(os.path.dirname(goal_model_dir), "goal_true_N_" + str(N_agents) + "_T_" + str(T_total) + "_obs_" + str(T_observation))
+        config_name = f"psn_gru_{obs_input_type}_planning_true_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
+        log_dir = os.path.join(goal_true_dir, config_name)
+        print(f"Training with TRUE goals - PSN logs will be saved under: {goal_true_dir}")
+    else:
+        # When using predicted goals, save under the goal inference model directory
+        config_name = f"psn_gru_{obs_input_type}_planning_pretrained_goals_N_{N_agents}_T_{T_total}_obs_{T_observation}_lr_{learning_rate}_bs_{batch_size}_sigma1_{sigma1}_sigma2_{sigma2}_epochs_{num_epochs}"
+        log_dir = os.path.join(goal_model_dir, config_name)
+        print(f"Training with PREDICTED goals - PSN logs will be saved under goal inference model directory: {goal_model_dir}")
+    
+    os.makedirs(log_dir, exist_ok=True)
+    print(f"PSN specific log directory: {log_dir}")
+    
+    # Initialize TensorBoard writer
+    writer = tb.SummaryWriter(log_dir)
+    
+    # Create optimizer with weight decay (AdamW)
+    optimizer = optax.adamw(
+        learning_rate=learning_rate,
+        weight_decay=5e-4  # L2 regularization to prevent overfitting
+    )
+    
+    # Determine observation dimensions based on input type
+    if obs_input_type == "partial":
+        obs_dim = 2  # Only position (x, y)
+    else:  # "full"
+        obs_dim = 4  # Full state (x, y, vx, vy)
+    
+    # Create train state
+    input_shape = (batch_size, T_observation * N_agents * obs_dim)
+    state = create_train_state(model, optimizer, input_shape, rng)
+    
+    # Test gradient flow before training starts
+    # print("\nTesting gradient flow before training...")
+    # test_observations = jnp.ones((1, T_observation * N_agents * state_dim))  # Dummy observations
+    # test_references = jnp.ones((1, T_reference, state_dim))  # Dummy references
+    # gradient_test_passed = test_gradient_flow(state, test_observations, goal_model, goal_trained_state, test_references)
+    
+    # if not gradient_test_passed:
+    #     print("WARNING: Gradient test failed! Training may not work properly.")
+    #     print("Continuing anyway to see what happens...")
+    # else:
+    #     print("Gradient test passed! Training should work correctly.")
+    
+    training_losses = []
+    validation_losses = []
+    # Track individual loss components over epochs
+    binary_losses = []
+    sparsity_losses = []
+    ego_agent_costs = []
+    validation_binary_losses = []
+    validation_sparsity_losses = []
+    validation_ego_agent_costs = []
+    best_loss = float('inf')
+    best_state = None
+    best_epoch = 0
+    
+    # Main training loop
+    print(f"Starting PSN training with pretrained goals...")
+    print(f"Goal inference model: {pretrained_goal_model_path}")
+    print(f"Training parameters: epochs={num_epochs}, lr={learning_rate}, batch_size={batch_size}")
+    print(f"Loss weights: σ1={sigma1}, σ2={sigma2}")
+    print(f"Training data: {len(training_data)} samples")
+    print(f"Validation data: {len(validation_data)} samples")
+    print(f"Device: {jax.devices()[0]}")
+    print("-" * 80)
+    
+    # Main training progress bar
+    total_steps = num_epochs * ((len(training_data) + batch_size - 1) // batch_size)
+    training_pbar = tqdm(total=total_steps, desc="Training Progress", position=0)
+    
+    for epoch in range(num_epochs):
+        # Calculate current sigma1 value (linear schedule from 0 to final value)
+        # current_sigma1 = (epoch / (num_epochs - 1)) * sigma1 if num_epochs > 1 else sigma1
+        current_sigma1 = sigma1
+        
+        epoch_losses = []
+        epoch_binary_losses = []
+        epoch_sparsity_losses = []
+        epoch_ego_agent_costs = []
+        # Create batches
+        num_batches = (len(training_data) + batch_size - 1) // batch_size
+        
+        # Progress bar for batches within each epoch
+        batch_pbar = tqdm(range(num_batches), 
+                         desc=f"Epoch {epoch+1}/{num_epochs} - Batches", 
+                   position=1, leave=False)
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(training_data))
+            batch_data = training_data[start_idx:end_idx]
+            
+            # Progress bar for samples within each batch (for data preparation)
+            sample_pbar = tqdm(range(len(batch_data)), 
+                              desc=f"Batch {batch_idx+1}/{num_batches} - Preparing data", 
+                              position=2, leave=False)
+            
+            # Prepare batch for training with progress bar
+            observations, masks, reference_trajectories, all_agents_ref_trajs = prepare_batch_for_training_with_progress(batch_data, sample_pbar, obs_input_type)
+            
+            # Close sample progress bar after preparation
+            sample_pbar.close()
+            
+            # Progress bar for ego agent cost computation (game solving)
+            cost_pbar = tqdm(range(len(batch_data)), 
+                           desc=f"Batch {batch_idx+1}/{num_batches} - Game solving", 
+                           position=2, leave=False)
+            
+            # Split random key for this step
+            rng, step_key = jax.random.split(rng)
+            
+            # Training step with game solving
+            state, loss, (binary_loss_val, sparsity_loss_val, ego_agent_cost_val) = train_step(
+                state, (observations, masks, reference_trajectories, all_agents_ref_trajs), batch_data, 
+                goal_model, goal_trained_state, current_sigma1, sigma2, use_true_goals, step_key, cost_pbar, obs_input_type)
+            
+            epoch_losses.append(float(loss))
+            epoch_binary_losses.append(float(binary_loss_val))
+            epoch_sparsity_losses.append(float(sparsity_loss_val))
+            epoch_ego_agent_costs.append(float(ego_agent_cost_val))
+            
+            # Close cost progress bar
+            cost_pbar.close()
+            
+            # Update batch progress bar
+            batch_pbar.set_postfix({
+                'Loss': f'{float(loss):.4f}',
+                'σ1': f'{current_sigma1:.3f}',
+                'Binary': f'{float(binary_loss_val):.4f}',
+                'Sparsity': f'{float(sparsity_loss_val):.4f}',
+                'EgoCost': f'{float(ego_agent_cost_val):.4f}'
+            })
+            batch_pbar.update(1)
+            
+            # Update main training progress bar
+            training_pbar.set_postfix({
+                'Epoch': f'{epoch+1}/{num_epochs}',
+                'Batch': f'{batch_idx+1}/{num_batches}',
+                'Loss': f'{float(loss):.4f}',
+                'σ1': f'{current_sigma1:.3f}'
+            })
+            training_pbar.update(1)
+        # Close batch progress bar
+        batch_pbar.close()
+        
+        # Perform validation
+        val_loss, val_binary_loss, val_sparsity_loss, val_ego_agent_cost, val_masks = validation_step(
+            state, validation_data, goal_model, goal_trained_state, batch_size, ego_agent_id=ego_agent_id, use_true_goals=use_true_goals, obs_input_type=obs_input_type)
+        validation_losses.append(val_loss)
+        validation_binary_losses.append(val_binary_loss)
+        validation_sparsity_losses.append(val_sparsity_loss)
+        validation_ego_agent_costs.append(val_ego_agent_cost)
+        
+        # Calculate average loss for the epoch
+        avg_loss = sum(epoch_losses) / len(epoch_losses)
+        avg_binary_loss = sum(epoch_binary_losses) / len(epoch_binary_losses)
+        avg_sparsity_loss = sum(epoch_sparsity_losses) / len(epoch_sparsity_losses)
+        avg_ego_agent_cost = sum(epoch_ego_agent_costs) / len(epoch_ego_agent_costs)
+        training_losses.append(avg_loss)
+        binary_losses.append(avg_binary_loss)
+        sparsity_losses.append(avg_sparsity_loss)
+        ego_agent_costs.append(avg_ego_agent_cost)
+        
+        # Track best model based on validation loss
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_epoch = epoch
+            
+            # Save best model using proper JAX/Flax serialization
+            best_model_path = os.path.join(log_dir, "psn_best_model.pkl")
+            model_bytes = flax.serialization.to_bytes(state)
+            with open(best_model_path, 'wb') as f:
+                pickle.dump(model_bytes, f)
+            print(f"\nNew best model found at epoch {epoch + 1} with validation loss: {best_loss:.4f} (σ1: {current_sigma1:.3f})")
+            print(f"Best model saved to: {best_model_path}")
+        
+        # Save model every 20 epochs
+        if (epoch + 1) % 20 == 0:
+            checkpoint_path = os.path.join(log_dir, f"psn_checkpoint_epoch_{epoch + 1}.pkl")
+            model_bytes = flax.serialization.to_bytes(state)
+            with open(checkpoint_path, 'wb') as f:
+                pickle.dump(model_bytes, f)
+            print(f"Checkpoint saved at epoch {epoch + 1}: {checkpoint_path}")
+        
+        # Update main progress bar
+        training_pbar.set_postfix({
+            'Epoch': f'{epoch+1}/{num_epochs}',
+            'Train Loss': f'{avg_loss:.4f}',
+            'Val Loss': f'{val_loss:.4f}',
+            'σ1': f'{current_sigma1:.3f}'
+        })
+        
+        # Log epoch-level metrics to TensorBoard
+        writer.add_scalar('Loss/Epoch/Training', avg_loss, epoch)
+        writer.add_scalar('Loss/Epoch/Validation', val_loss, epoch)
+        writer.add_scalar('Loss/Epoch/Best', best_loss, epoch)
+        writer.add_scalar('Loss/Epoch/Binary', avg_binary_loss, epoch)
+        writer.add_scalar('Loss/Epoch/Sparsity', avg_sparsity_loss, epoch)
+        writer.add_scalar('Loss/Epoch/EgoAgentCost', avg_ego_agent_cost, epoch)
+        writer.add_scalar('Loss/Epoch/Validation_Binary', val_binary_loss, epoch)
+        writer.add_scalar('Loss/Epoch/Validation_Sparsity', val_sparsity_loss, epoch)
+        writer.add_scalar('Loss/Epoch/Validation_EgoAgentCost', val_ego_agent_cost, epoch)
+        writer.add_scalar('Hyperparameters/Sigma1', current_sigma1, epoch)
+        writer.add_scalar('Training/EpochProgress', (epoch + 1) / num_epochs, epoch)
+        
+        # Training progress metrics
+        writer.add_scalar('Progress/EpochProgress', (epoch + 1) / num_epochs, epoch)
+        writer.add_scalar('Progress/LossImprovement', float(best_loss - val_loss), epoch)
+        
+        # Add text summary for hyperparameters
+        if epoch == 0:
+            writer.add_text('Hyperparameters', f"""
+            - Number of agents: {N_agents}
+            - Total game steps: {T_total}
+            - Observation steps: {T_observation}
+            - Learning rate: {learning_rate}
+            - Batch size: {batch_size}
+            - Sigma1 (final): {sigma1}
+            - Sigma2: {sigma2}
+            - Total epochs: {num_epochs}
+            - Using pretrained goal inference: True
+            - Goal inference model: {pretrained_goal_model_path}
+            - Validation split: 25% (hardcoded for now)
+            """, epoch)
+        
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}/{num_epochs}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}, Best Val: {best_loss:.4f} (epoch {best_epoch+1}), σ1: {current_sigma1:.3f}")
+        
+        # Clean up memory after each epoch
+        gc.collect()
+        if hasattr(jax, 'clear_caches'):
+            jax.clear_caches()
+    
+    # Close progress bar
+    training_pbar.close()
+    
+    # Close TensorBoard writer
+    writer.close()
+    
+    print(f"\nTraining completed! Best model found at epoch {best_epoch + 1} with loss: {best_loss:.4f}")
+    
+    return training_losses, validation_losses, binary_losses, sparsity_losses, ego_agent_costs, validation_binary_losses, validation_sparsity_losses, validation_ego_agent_costs, state, log_dir, best_loss, best_epoch
+
+# ============================================================================
+# MODEL LOADING UTILITIES
+# ============================================================================
+
+def load_trained_models(psn_model_path: str, goal_model_path: str, obs_input_type: str = "full") -> Tuple[PlayerSelectionNetwork, Any, GoalInferenceNetwork, Any]:
+    """
+    Load trained PSN and goal inference models from files.
+    
+    Args:
+        psn_model_path: Path to the trained PSN model file
+        goal_model_path: Path to the trained goal inference model file
+        obs_input_type: Observation input type ["full", "partial"]
+        
+    Returns:
+        Tuple of (psn_model, psn_trained_state, goal_model, goal_trained_state)
+    """
+    print(f"Loading trained PSN model from: {psn_model_path}")
+    
+    # Load the PSN model bytes
+    with open(psn_model_path, 'rb') as f:
+        psn_model_bytes = pickle.load(f)
+    
+    # Create the PSN model
+    psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims, obs_input_type=obs_input_type)
+    
+    # Deserialize the PSN state
+    psn_trained_state = flax.serialization.from_bytes(psn_model, psn_model_bytes)
+    print("✓ PSN model loaded successfully")
+    
+    print(f"Loading trained goal inference model from: {goal_model_path}")
+    
+    # Load the goal inference model bytes
+    with open(goal_model_path, 'rb') as f:
+        goal_model_bytes = pickle.load(f)
+    
+    # Create the goal inference model
+    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims, obs_input_type=obs_input_type)
+    
+    # Deserialize the goal inference state
+    goal_trained_state = flax.serialization.from_bytes(goal_model, goal_model_bytes)
+    print("✓ Goal inference model loaded successfully")
+    
+    return psn_model, psn_trained_state, goal_model, goal_trained_state
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+if __name__ == "__main__":
+    print("=" * 80)
+    print("PSN Training with Pretrained Goal Inference Network")
+    print("=" * 80)
+
+    # Load reference trajectories
+    print(f"Loading reference trajectories from directory: {reference_dir}")
+    training_data, validation_data = load_reference_trajectories(reference_dir)
+    
+    # Check if we should use true goals or predicted goals
+    use_true_goals = config.psn.use_true_goals
+    
+    if use_true_goals:
+        print("Training PSN with TRUE goals (no goal inference model needed)")
+        goal_model = None
+        goal_trained_state = None
+    else:
+        print("Training PSN with PREDICTED goals from goal inference model")
+        # Load pretrained goal inference model
+        goal_model, goal_trained_state = load_pretrained_goal_model(pretrained_goal_model_path, config.psn.obs_input_type)
+    
+    # Create PSN model with observation type
+    psn_model = PlayerSelectionNetwork(
+        hidden_dims=psn_hidden_dims,
+        obs_input_type=config.psn.obs_input_type
+    )
+    
+    # Train PSN with appropriate goal source
+    print(f"Observation input type: {config.psn.obs_input_type}")
+    training_losses, validation_losses, binary_losses, sparsity_losses, ego_agent_costs, validation_binary_losses, validation_sparsity_losses, validation_ego_agent_costs, trained_state, log_dir, best_loss, best_epoch = train_psn_with_pretrained_goals(
+        psn_model, training_data, validation_data, goal_model, goal_trained_state,
+        num_epochs=num_epochs, learning_rate=learning_rate,
+        sigma1=sigma1, sigma2=sigma2, batch_size=batch_size,
+        use_true_goals=use_true_goals, obs_input_type=config.psn.obs_input_type
+    )
+    
+    # Save final model
+    final_model_path = os.path.join(log_dir, "psn_final_model.pkl")
+    final_model_bytes = flax.serialization.to_bytes(trained_state)
+    with open(final_model_path, 'wb') as f:
+        pickle.dump(final_model_bytes, f)
+    
+    # Save training configuration
+    training_config = {
+        'num_epochs': num_epochs,
+        'learning_rate': learning_rate,
+        'batch_size': batch_size,
+        'sigma1': sigma1,
+        'sigma2': sigma2,
+        'N_agents': N_agents,
+        'T_total': T_total,
+        'T_observation': T_observation,
+        'state_dim': state_dim,
+        'control_dim': control_dim,
+        'best_loss': best_loss,
+        'best_epoch': best_epoch,
+        'use_true_goals': use_true_goals,
+        'goal_inference_model_path': pretrained_goal_model_path if not use_true_goals else None,
+        'goal_inference_model_dir': os.path.dirname(pretrained_goal_model_path) if not use_true_goals else None
+    }
+    
+    config_path = os.path.join(log_dir, "training_config.json")
+    with open(config_path, 'w') as f:
+        json.dump(training_config, f, indent=2)
+    
+    # Create a summary file showing the relationship
+    summary_path = os.path.join(log_dir, "training_summary.txt")
+    with open(summary_path, 'w') as f:
+        if use_true_goals:
+            f.write("PSN Training with TRUE Goals\n")
+            f.write("=" * 60 + "\n\n")
+            f.write("Goal Source: TRUE goals extracted from reference trajectories\n")
+            f.write("Note: No goal inference model used\n")
+        else:
+            f.write("PSN Training with Pretrained Goal Inference Network\n")
+            f.write("=" * 60 + "\n\n")
+            f.write(f"Goal Inference Model: {pretrained_goal_model_path}\n")
+            f.write(f"Goal Inference Model Directory: {os.path.dirname(pretrained_goal_model_path)}\n")
+        
+        f.write(f"PSN Training Directory: {log_dir}\n\n")
+        f.write(f"Training Parameters:\n")
+        f.write(f"  - Epochs: {num_epochs}\n")
+        f.write(f"  - Learning Rate: {learning_rate}\n")
+        f.write(f"  - Batch Size: {batch_size}\n")
+        f.write(f"  - Sigma1: {sigma1}\n")
+        f.write(f"  - Sigma2: {sigma2}\n")
+        f.write(f"  - N_agents: {N_agents}\n")
+        f.write(f"  - T_total: {T_total}\n")
+        f.write(f"  - T_observation: {T_observation}\n\n")
+        f.write(f"Results:\n")
+        f.write(f"  - Best Validation Loss: {best_loss:.6f}\n")
+        f.write(f"  - Best Epoch: {best_epoch + 1}\n")
+        f.write(f"  - Final Training Loss: {training_losses[-1]:.6f}\n")
+        f.write(f"  - Final Validation Loss: {validation_losses[-1]:.6f}\n\n")
+        f.write(f"Files:\n")
+        f.write(f"  - Best Model: psn_best_model.pkl\n")
+        f.write(f"  - Final Model: psn_final_model.pkl\n")
+        f.write(f"  - Config: training_config.json\n")
+        f.write(f"  - Summary: training_summary.txt\n")
+
+        f.write(f"  - TensorBoard Logs: events.out.tfevents.*\n")
+    
+    # Print final results
+    print("\n" + "=" * 80)
+    print("TRAINING COMPLETED SUCCESSFULLY!")
+    print("=" * 80)
+    
+    if use_true_goals:
+        print("Goal Source: TRUE goals extracted from reference trajectories")
+        print("Note: No goal inference model used")
+    else:
+        print(f"Goal inference model directory: {os.path.dirname(pretrained_goal_model_path)}")
+    
+    print(f"PSN log directory: {log_dir}")
+    print(f"Best model saved to: {os.path.join(log_dir, 'psn_best_model.pkl')}")
+    print(f"Final model saved to: {final_model_path}")
+    print(f"Config saved to: {config_path}")
+    print(f"Summary saved to: {summary_path}")
+    print(f"\nFinal training loss: {training_losses[-1]:.4f}")
+    print(f"Final validation loss: {validation_losses[-1]:.4f}")
+    print(f"Best validation loss: {best_loss:.4f} (achieved at epoch {best_epoch + 1})")
+    print(f"Training progress plot saved to: {os.path.join(log_dir, 'training_loss.png')}")
+    print("\nTo view TensorBoard logs, run:")
+    print(f"tensorboard --logdir={log_dir}")
+    
+    if use_true_goals:
+        print(f"\nNote: PSN logs are organized under the goal_true directory for better organization.")
+        print(f"Directory structure: goal_true_N_{N_agents}_T_{T_total}_obs_{T_observation}/ → {os.path.basename(log_dir)}/")
+    else:
+        print(f"\nNote: PSN logs are organized under the goal inference model directory for better organization.")
+        print(f"Directory structure: {os.path.dirname(pretrained_goal_model_path)}/ → {os.path.basename(log_dir)}/")
