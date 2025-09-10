@@ -535,7 +535,7 @@ def create_loss_functions(agents: list, mask_values=None, is_training: bool = Tr
                         collision_scale = config.optimization.collision_scale
                         base_collision = collision_weight * jnp.exp(-collision_scale * distances_squared)
                         masked_collision = base_collision * mask_values[:len(other_states)]
-                        collision_loss = jnp.sum(masked_collision) / (len(agents) - 1)
+                        collision_loss = jnp.sum(masked_collision)
                 
                 # Control cost - using config values for consistency
                 ctrl_weight = config.optimization.control_weight

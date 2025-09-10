@@ -183,3 +183,5 @@ cython_debug/
 
 log/
 log_archive/
+
+*.zip

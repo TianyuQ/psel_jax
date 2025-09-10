@@ -36,7 +36,7 @@ from psn_training_with_pretrained_goals import (
     PlayerSelectionNetwork, GoalInferenceNetwork, load_trained_models
 )
 # Import baselines
-from baselines import baseline_selection
+from player_selection_network.baselines import baseline_selection
 
 # ============================================================================
 # LOAD CONFIGURATION AND SETUP
@@ -103,6 +103,125 @@ class PointAgent(iLQR):
             ut[0],  # dvx/dt = ax
             ut[1]   # dvy/dt = ay
         ])
+
+# ============================================================================
+# METRICS COMPUTATION FUNCTIONS
+# ============================================================================
+
+def compute_ade_fde(predicted_trajectory: jnp.ndarray, ground_truth_trajectory: jnp.ndarray) -> Tuple[float, float]:
+    """
+    Compute Average Displacement Error (ADE) and Final Displacement Error (FDE).
+    
+    Args:
+        predicted_trajectory: Predicted trajectory (T, 2) - position only
+        ground_truth_trajectory: Ground truth trajectory (T, 2) - position only
+    
+    Returns:
+        Tuple of (ADE, FDE)
+    """
+    # Ensure both trajectories have the same length
+    min_length = min(len(predicted_trajectory), len(ground_truth_trajectory))
+    pred_traj = predicted_trajectory[:min_length, :2]  # Only position (x, y)
+    gt_traj = ground_truth_trajectory[:min_length, :2]  # Only position (x, y)
+    
+    # Compute displacement errors at each time step
+    displacement_errors = jnp.linalg.norm(pred_traj - gt_traj, axis=1)
+    
+    # ADE: average displacement error over all time steps
+    ade = jnp.mean(displacement_errors)
+    
+    # FDE: displacement error at the final time step
+    fde = displacement_errors[-1]
+    
+    return float(ade), float(fde)
+
+
+def compute_planning_metrics(ego_trajectory: jnp.ndarray, 
+                           other_trajectories: List[jnp.ndarray],
+                           ego_controls: jnp.ndarray,
+                           ego_goals: jnp.ndarray,
+                           dt: float) -> Dict[str, float]:
+    """
+    Compute planning metrics: navigation cost, safety cost, and control cost.
+    
+    Args:
+        ego_trajectory: Ego agent trajectory (T, 4) - [x, y, vx, vy]
+        other_trajectories: List of other agent trajectories (T, 4) each
+        ego_controls: Ego agent controls (T, 2) - [ax, ay]
+        ego_goals: Ego agent goals (2,) - [x, y]
+        dt: Time step size
+    
+    Returns:
+        Dictionary with navigation_cost, safety_cost, control_cost
+    """
+    T = len(ego_trajectory)
+    
+    # Navigation cost: distance to goal
+    ego_positions = ego_trajectory[:, :2]  # (T, 2)
+    goal_positions = jnp.tile(ego_goals, (T, 1))  # (T, 2)
+    navigation_errors = jnp.linalg.norm(ego_positions - goal_positions, axis=1)
+    navigation_cost = jnp.sum(navigation_errors) * dt
+    
+    # Safety cost: collision avoidance with other agents
+    collision_weight = config.optimization.collision_weight
+    collision_scale = config.optimization.collision_scale
+    safety_cost = 0.0
+    
+    for other_traj in other_trajectories:
+        if len(other_traj) >= T:
+            other_positions = other_traj[:T, :2]  # (T, 2)
+            distances = jnp.linalg.norm(ego_positions - other_positions, axis=1)
+            # Exponential penalty for proximity
+            safety_penalties = collision_weight * jnp.exp(-collision_scale * distances)
+            safety_cost += jnp.sum(safety_penalties) * dt
+    
+    # Control cost: control effort
+    ctrl_weight = config.optimization.control_weight
+    control_magnitudes = jnp.linalg.norm(ego_controls, axis=1)
+    control_cost = ctrl_weight * jnp.sum(control_magnitudes) * dt
+    
+    return {
+        'navigation_cost': float(navigation_cost),
+        'safety_cost': float(safety_cost),
+        'control_cost': float(control_cost)
+    }
+
+
+def compute_trajectory_metrics(ego_trajectory: jnp.ndarray,
+                             ground_truth_trajectory: jnp.ndarray,
+                             other_trajectories: List[jnp.ndarray],
+                             ego_controls: jnp.ndarray,
+                             ego_goals: jnp.ndarray,
+                             dt: float) -> Dict[str, float]:
+    """
+    Compute all trajectory metrics for a single sample.
+    
+    Args:
+        ego_trajectory: Computed ego trajectory (T, 4)
+        ground_truth_trajectory: Ground truth ego trajectory (T, 4)
+        other_trajectories: List of other agent ground truth trajectories
+        ego_controls: Computed ego controls (T, 2)
+        ego_goals: Ego agent goals (2,)
+        dt: Time step size
+    
+    Returns:
+        Dictionary with all computed metrics
+    """
+    metrics = {}
+    
+    # Prediction metrics (ADE, FDE)
+    if config.testing.receding_horizon.compute_prediction_metrics:
+        ade, fde = compute_ade_fde(ego_trajectory, ground_truth_trajectory)
+        metrics['ade'] = ade
+        metrics['fde'] = fde
+    
+    # Planning metrics (navigation, safety, control costs)
+    if config.testing.receding_horizon.compute_planning_metrics:
+        planning_metrics = compute_planning_metrics(
+            ego_trajectory, other_trajectories, ego_controls, ego_goals, dt)
+        metrics.update(planning_metrics)
+    
+    return metrics
 
 
 # ============================================================================
@@ -442,12 +561,13 @@ def extract_reference_goals(sample_data: Dict[str, Any]) -> jnp.ndarray:
 
 
 def test_receding_horizon_with_models(sample_data: Dict[str, Any],
-                                      psn_model: PlayerSelectionNetwork,
-                                      psn_trained_state: Any,
-                                      goal_model: GoalInferenceNetwork,
-                                      goal_trained_state: Any,
+                                      psn_model: PlayerSelectionNetwork = None,
+                                      psn_trained_state: Any = None,
+                                      goal_model: GoalInferenceNetwork = None,
+                                      goal_trained_state: Any = None,
                                       psn_model_path: str = None,
-                                      option: str = None) -> Dict[str, Any]:
+                                      use_baseline: bool = False,
+                                      baseline_mode: str = None) -> Dict[str, Any]:
 
     
     """
@@ -455,11 +575,13 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     
     Args:
         sample_data: Reference trajectory sample data (will be normalized)
-        psn_model: Trained PSN model
-        psn_trained_state: Trained PSN model state
-        goal_model: Trained goal inference model
-        goal_trained_state: Trained goal inference model state
-        option: Baseline option to use instead of PSN model (if any)
+        psn_model: Trained PSN model (optional if use_baseline=True)
+        psn_trained_state: Trained PSN model state (optional if use_baseline=True)
+        goal_model: Trained goal inference model (optional if use_baseline=True)
+        goal_trained_state: Trained goal inference model state (optional if use_baseline=True)
+        psn_model_path: Path to PSN model (for logging)
+        use_baseline: Whether to use baseline methods instead of PSN model
+        baseline_mode: Baseline method to use (if use_baseline=True)
     
     Returns:
         Dictionary containing test results
@@ -474,13 +596,18 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         'sample_id': sample_data['sample_id'],
         'ego_agent_id': ego_agent_id,
         'goal_source': config.testing.receding_horizon.goal_source,
-        'goal_inference_input_method': getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps') if config.testing.receding_horizon.goal_source == "goal_inference" else None,
+        'use_baseline': use_baseline,
+        'baseline_mode': baseline_mode if use_baseline else None,
         'T_observation': T_observation,
         'T_total': T_total,
         'T_receding_horizon_planning': T_receding_horizon_planning,
         'T_receding_horizon_iterations': T_receding_horizon_iterations,
         'receding_horizon_results': [],
-        'final_game_state': None
+        'final_game_state': None,
+        'computation_times': [],  # Per receding horizon step times
+        'sample_computation_time': 0.0,  # Total time for entire sample
+        'prediction_metrics': {},
+        'planning_metrics': {}
     }
     
     # Initialize game state with ground truth trajectories for observation period
@@ -513,6 +640,9 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     # Phase 2: Receding horizon planning with models (steps T_observation+1 to T_total)
     print(f"    Phase 2: Receding horizon planning with models (steps {T_observation+1} to {T_total})")
     print(f"        Initial stabilization: {config.testing.receding_horizon.initial_stabilization_iterations} iterations")
+    
+    # Start timing the entire receding horizon planning phase
+    sample_start_time = time.time()
     
     # Initialize receding horizon trajectories
     receding_horizon_trajectories = [[] for _ in range(n_agents)]
@@ -550,48 +680,8 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 # Use true goals for PSN testing
                 predicted_goals = extract_reference_goals(normalized_sample_data)
             elif goal_source == "goal_inference":
-                # Check input method for goal inference
-                input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
-                
-                if input_method == "first_steps":
-                    # Use first T_observation steps from the original ground truth trajectory
-                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
-                elif input_method == "sliding_window":
-                    # Use sliding window: latest T_observation steps from current game state
-                    current_total_steps = T_observation + iteration
-                    obs_start_step = max(0, current_total_steps - T_observation)  # Start of observation window
-                    
-                    # Build sliding window observation trajectory (same as PSN input construction)
-                    goal_obs_traj = []
-                    for obs_step in range(T_observation):
-                        actual_step = obs_start_step + obs_step
-                        step_states = []
-                        
-                        for agent_idx in range(n_agents):
-                            agent_key = f"agent_{agent_idx}"
-                            if agent_idx == 0:  # Ego agent: use computed accumulated trajectory
-                                agent_states = current_game_state["trajectories"][agent_key]["states"]
-                                if actual_step < len(agent_states):
-                                    step_states.append(agent_states[actual_step])
-                                else:
-                                    # Use last available state if beyond current trajectory
-                                    last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
-                                    step_states.append(last_state)
-                            else:  # Other agents: use ground truth receding horizon trajectory
-                                agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
-                                if actual_step < len(agent_states):
-                                    step_states.append(agent_states[actual_step])
-                                else:
-                                    # Use last state if trajectory is too short
-                                    last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
-                                    step_states.append(last_state)
-                        
-                        goal_obs_traj.append(step_states)
-                    
-                    # Convert to array format
-                    goal_obs_traj = jnp.array(goal_obs_traj)  # (T_observation, N_agents, state_dim)
-                else:
-                    raise ValueError(f"Invalid goal_inference_input_method: {input_method}. Must be 'first_steps' or 'sliding_window'")
+                # Always use first T_observation steps from the original ground truth trajectory
+                goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
                 
                 # Convert to input format for goal inference model
                 goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
@@ -646,11 +736,12 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             obs_array = jnp.array(obs_traj)  # (T_observation, n_agents, state_dim)
             obs_input = obs_array.reshape(1, T_observation, n_agents, 4)  # (1, 10, 4, 4)
         
-            # Uses the 'option' parameter to switch between the baseline and the PSN model.
-            if option:
-                # A baseline method is specified, so prepare arguments and call it.
+            # Use baseline or PSN model based on configuration
+            if use_baseline:
+                # Use baseline method
                 mode_parameter = config.testing.receding_horizon.baseline_parameter
                 trajectory_history = [np.array(current_game_state["trajectories"][f"agent_{i}"]["states"]) for i in range(n_agents)]
+                
                 
                 if iteration > config.testing.receding_horizon.initial_stabilization_iterations:
                     prev_controls = [np.array(c) for c in results['receding_horizon_results'][-1]['first_controls']]
@@ -661,12 +752,14 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                     input_traj=obs_input,
                     trajectory=trajectory_history,
                     control=prev_controls,
-                    mode=option,
+                    mode=baseline_mode,
                     sim_step=iteration,
                     mode_parameter=mode_parameter
                 )
             else:
-                # No baseline option given, so use the original PSN model logic.
+                # Use PSN model
+                if psn_model is None or psn_trained_state is None:
+                    raise ValueError("PSN model and state must be provided when use_baseline=False")
                 predicted_mask = psn_model.apply({'params': psn_trained_state['params']}, obs_input, deterministic=True)
                 predicted_mask = predicted_mask[0]  # Remove batch dimension
             
@@ -676,10 +769,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             num_selected = len(selected_agents)
             
             # Calculate mask sparsity based on configuration
-            if config.testing.receding_horizon.mask_sparsity_calculation == "fraction":
-                mask_sparsity = num_selected / n_agents
-            else:  # "ratio" - original calculation
-                mask_sparsity = 1.0 - (num_selected / (n_agents - 1))
+            mask_sparsity = num_selected / (n_agents - 1)
         
         # Step 3: Solve receding horizon game with predicted goals
         # Apply masking: only include agents above threshold (EXACTLY like training script)
@@ -745,6 +835,9 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             'game_solving_time': game_time
         }
         
+        # Track computation time
+        results['computation_times'].append(game_time)
+        
         results['receding_horizon_results'].append(iteration_result)
         
         # Step 5: Apply first controls to move agents forward one step
@@ -793,8 +886,54 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     # Store final game state
     results['final_game_state'] = current_game_state
     
-    # Compute summary statistics
+    # Compute trajectory metrics (only for steps 10-50, excluding ground truth observation period)
     if results['receding_horizon_results']:
+        # Extract ego trajectory (computed) and ground truth trajectory
+        ego_computed_trajectory = jnp.array(current_game_state["trajectories"][f"agent_{ego_agent_id}"]["states"])
+        ego_ground_truth_trajectory = jnp.array(normalized_sample_data["trajectories"][f"agent_{ego_agent_id}"]["states"])
+        
+        # Only analyze steps 10-50 (receding horizon planning phase)
+        # Skip first 10 steps which use ground truth data
+        analysis_start_step = T_observation  # Step 10
+        analysis_end_step = T_total  # Step 50
+        
+        # Extract trajectories for analysis period only
+        ego_computed_analysis = ego_computed_trajectory[analysis_start_step:analysis_end_step]
+        ego_ground_truth_analysis = ego_ground_truth_trajectory[analysis_start_step:analysis_end_step]
+        
+        # Extract other agent ground truth trajectories for analysis period
+        other_ground_truth_trajectories = []
+        for i in range(n_agents):
+            if i != ego_agent_id:
+                other_traj = jnp.array(normalized_sample_data["trajectories"][f"agent_{i}"]["states"])
+                other_traj_analysis = other_traj[analysis_start_step:analysis_end_step]
+                other_ground_truth_trajectories.append(other_traj_analysis)
+        
+        # Extract ego controls (from receding horizon results) - these correspond to steps 10-50
+        ego_controls = []
+        for iter_result in results['receding_horizon_results']:
+            ego_control = jnp.array(iter_result['first_controls'][ego_agent_id])
+            ego_controls.append(ego_control)
+        ego_controls = jnp.array(ego_controls)  # (T_receding_horizon_iterations, 2)
+        
+        # Extract ego goals
+        ego_goals = jnp.array(extract_reference_goals(normalized_sample_data)[ego_agent_id])
+        
+        # Compute trajectory metrics for analysis period only
+        trajectory_metrics = compute_trajectory_metrics(
+            ego_computed_analysis,
+            ego_ground_truth_analysis,
+            other_ground_truth_trajectories,
+            ego_controls,
+            ego_goals,
+            dt
+        )
+        
+        # Store metrics
+        results['prediction_metrics'] = {k: v for k, v in trajectory_metrics.items() if k in ['ade', 'fde']}
+        results['planning_metrics'] = {k: v for k, v in trajectory_metrics.items() if k in ['navigation_cost', 'safety_cost', 'control_cost']}
+        
+        # Compute summary statistics
         goal_rmse_values = []
         mask_sparsity_values = []
         num_selected_values = []
@@ -813,15 +952,40 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         results['goal_rmse'] = float(np.mean(goal_rmse_values))
         results['mask_sparsity'] = float(np.mean(mask_sparsity_values))
         results['num_selected_agents'] = float(np.mean(num_selected_values))
+        
+        # Compute mean computation time
+        results['mean_computation_time'] = float(np.mean(results['computation_times']))
     else:
         results['goal_rmse'] = float('inf')
         results['mask_sparsity'] = 0.0
         results['num_selected_agents'] = 0.0
+        results['mean_computation_time'] = 0.0
+        results['prediction_metrics'] = {'ade': float('inf'), 'fde': float('inf')}
+        results['planning_metrics'] = {'navigation_cost': float('inf'), 'safety_cost': float('inf'), 'control_cost': float('inf')}
+    
+    # End timing the entire receding horizon planning phase
+    sample_end_time = time.time()
+    results['sample_computation_time'] = sample_end_time - sample_start_time
     
     print(f"    ✓ Completed receding horizon planning with models")
     print(f"    ✓ Goal RMSE: {results['goal_rmse']:.4f}")
     print(f"    ✓ Mask Sparsity: {results['mask_sparsity']:.2f}")
     print(f"    ✓ Selected Agents: {results['num_selected_agents']:.1f}")
+    print(f"    ✓ Mean Computation Time per Receding Horizon Step: {results['mean_computation_time']:.4f}s")
+    print(f"    ✓ Total Computation Time per Sample: {results['sample_computation_time']:.4f}s")
+    
+    # Print prediction metrics (steps 10-50 only)
+    if results['prediction_metrics']:
+        print(f"    ✓ Prediction Metrics (steps {T_observation}-{T_total}):")
+        print(f"        ADE: {results['prediction_metrics'].get('ade', 'N/A'):.4f}")
+        print(f"        FDE: {results['prediction_metrics'].get('fde', 'N/A'):.4f}")
+    
+    # Print planning metrics (steps 10-50 only)
+    if results['planning_metrics']:
+        print(f"    ✓ Planning Metrics (steps {T_observation}-{T_total}):")
+        print(f"        Navigation Cost: {results['planning_metrics'].get('navigation_cost', 'N/A'):.4f}")
+        print(f"        Safety Cost: {results['planning_metrics'].get('safety_cost', 'N/A'):.4f}")
+        print(f"        Control Cost: {results['planning_metrics'].get('control_cost', 'N/A'):.4f}")
     
     # Store normalized data for GIF creation
     results['normalized_sample_data'] = normalized_sample_data
@@ -1061,20 +1225,24 @@ def create_receding_horizon_gif(sample_data: Dict[str, Any],
         return ""
 
 
-def run_receding_horizon_testing(psn_model_path: str, 
-                                goal_model_path: str,
-                                reference_file: str,
+def run_receding_horizon_testing(psn_model_path: str = None, 
+                                goal_model_path: str = None,
+                                reference_file: str = None,
                                 output_dir: str = None,
-                                num_samples: int = 5) -> List[Dict[str, Any]]:
+                                num_samples: int = None,
+                                use_baseline: bool = None,
+                                baseline_mode: str = None) -> List[Dict[str, Any]]:
     """
     Run receding horizon testing with goal inference and player selection models.
     
     Args:
-        psn_model_path: Path to trained PSN model
-        goal_model_path: Path to trained goal inference model
-        reference_file: Path to reference trajectory file
-        output_dir: Directory to save test results
-        num_samples: Number of samples to test
+        psn_model_path: Path to trained PSN model (optional if use_baseline=True)
+        goal_model_path: Path to trained goal inference model (optional if use_baseline=True)
+        reference_file: Path to reference trajectory file (uses config if None)
+        output_dir: Directory to save test results (uses config if None)
+        num_samples: Number of samples to test (uses config if None)
+        use_baseline: Whether to use baseline methods (uses config if None)
+        baseline_mode: Baseline method to use (uses config if None)
     
     Returns:
         List of test results for each sample
@@ -1083,27 +1251,68 @@ def run_receding_horizon_testing(psn_model_path: str,
     print("RECEDING HORIZON TESTING WITH GOAL INFERENCE AND PLAYER SELECTION MODELS")
     print("=" * 80)
     
+    # Load configuration values if not provided
+    if reference_file is None:
+        reference_file = config.testing.psn_data_dir
+    if num_samples is None:
+        num_samples = config.testing.receding_horizon.num_samples
+    if use_baseline is None:
+        use_baseline = config.testing.receding_horizon.use_baseline
+    if baseline_mode is None:
+        baseline_mode = config.testing.receding_horizon.baseline_mode
+    
     # Determine output directory based on goal source and input method if not provided
     if output_dir is None:
         goal_source = config.testing.receding_horizon.goal_source
-        if goal_source == "true_goals":
-            output_dir = "receding_horizon_results_goal_true"
-        elif goal_source == "goal_inference":
-            # Check input method for goal inference
-            input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
-            if input_method == "sliding_window":
-                output_dir = "receding_horizon_results_goal_inference_sliding_window"
-            else:  # first_steps
-                output_dir = "receding_horizon_results_goal_inference"
+        if use_baseline:
+            # For baseline methods, save to baseline_results directory with method name and goal source
+            method_name = baseline_mode.lower().replace(' ', '_').replace('_', '')
+            if goal_source == "goal_inference":
+                output_dir = f"baseline_results/receding_horizon_results_{method_name}_goal_inference"
+            else:
+                output_dir = f"baseline_results/receding_horizon_results_{method_name}_goal_true"
         else:
-            output_dir = "receding_horizon_test_results"
+            if goal_source == "true_goals":
+                # Extract method name from PSN model path if available
+                if psn_model_path:
+                    psn_model_name = os.path.basename(psn_model_path).replace('.pkl', '')
+                    output_dir = f"receding_horizon_results_goal_true_{psn_model_name}"
+                else:
+                    output_dir = "receding_horizon_results_goal_true"
+            elif goal_source == "goal_inference":
+                # Always use first_steps for goal inference
+                if psn_model_path:
+                    psn_model_name = os.path.basename(psn_model_path).replace('.pkl', '')
+                    output_dir = f"receding_horizon_results_goal_inference_{psn_model_name}"
+                else:
+                    output_dir = "receding_horizon_results_goal_inference"
+            else:
+                output_dir = "receding_horizon_test_results"
     
-    # Load models
-    print(f"Loading trained models...")
-    psn_model, psn_trained_state, goal_model, goal_trained_state = load_trained_models(
-        psn_model_path, goal_model_path)
+    # Load models based on goal source and baseline configuration
+    psn_model, psn_trained_state, goal_model, goal_trained_state = None, None, None, None
     
-    print(f"✓ Models loaded successfully")
+    # Determine goal source
+    goal_source = config.testing.receding_horizon.goal_source
+    
+    if goal_source == "goal_inference":
+        # Load goal inference model regardless of baseline/PSN choice
+        print(f"Loading goal inference model...")
+        if goal_model_path is None:
+            raise ValueError("Goal model path must be provided when goal_source='goal_inference'")
+        _, _, goal_model, goal_trained_state = load_trained_models(None, goal_model_path)
+        print(f"✓ Goal inference model loaded successfully")
+    
+    if not use_baseline:
+        # Load PSN model only when not using baseline
+        print(f"Loading PSN model...")
+        if psn_model_path is None:
+            raise ValueError("PSN model path must be provided when use_baseline=False")
+        psn_model, psn_trained_state, _, _ = load_trained_models(psn_model_path, None)
+        print(f"✓ PSN model loaded successfully")
+    else:
+        print(f"Using baseline method: {baseline_mode}")
+        print(f"✓ Baseline mode configured")
     
     # Load reference data
     print(f"Loading reference data from: {reference_file}")
@@ -1129,9 +1338,18 @@ def run_receding_horizon_testing(psn_model_path: str,
     
     print(f"Loaded {len(reference_data)} reference samples")
     
-    # Limit number of samples for testing
-    test_samples = reference_data[:min(num_samples, len(reference_data))]
-    print(f"Testing on {len(test_samples)} samples")
+    # Select samples based on configuration
+    if config.testing.receding_horizon.use_later_samples:
+        # Use later 128 samples (samples 384-511)
+        train_samples = config.training.train_samples  # 384
+        start_idx = train_samples  # Start from sample 384
+        end_idx = start_idx + num_samples  # End at sample 384 + 128 = 512
+        test_samples = reference_data[start_idx:end_idx]
+        print(f"Using later samples {start_idx}-{end_idx-1} ({len(test_samples)} samples)")
+    else:
+        # Use first N samples (original behavior)
+        test_samples = reference_data[:min(num_samples, len(reference_data))]
+        print(f"Using first {len(test_samples)} samples")
     
     # Test each sample
     all_results = []
@@ -1141,7 +1359,8 @@ def run_receding_horizon_testing(psn_model_path: str,
         try:
             # Run receding horizon testing with models
             results = test_receding_horizon_with_models(
-                sample_data, psn_model, psn_trained_state, goal_model, goal_trained_state, psn_model_path)
+                sample_data, psn_model, psn_trained_state, goal_model, goal_trained_state, 
+                psn_model_path, use_baseline, baseline_mode)
             
             # Save results
             filepath = save_test_results(results, output_dir)
@@ -1168,11 +1387,42 @@ def run_receding_horizon_testing(psn_model_path: str,
         goal_rmse_values = [r['goal_rmse'] for r in all_results if r['goal_rmse'] != float('inf')]
         mask_sparsity_values = [r['mask_sparsity'] for r in all_results]
         num_selected_values = [r['num_selected_agents'] for r in all_results]
+        computation_times = [r['mean_computation_time'] for r in all_results if r['mean_computation_time'] > 0]
         
         if goal_rmse_values:
             print(f"Goal Prediction RMSE: {np.mean(goal_rmse_values):.4f} ± {np.std(goal_rmse_values):.4f}")
         print(f"Mask Sparsity: {np.mean(mask_sparsity_values):.3f} ± {np.std(mask_sparsity_values):.3f}")
         print(f"Average Selected Agents: {np.mean(num_selected_values):.2f} ± {np.std(num_selected_values):.2f}")
+        if computation_times:
+            print(f"Mean Computation Time per Receding Horizon Step: {np.mean(computation_times):.4f}s ± {np.std(computation_times):.4f}s")
+        
+        # Per-sample computation times
+        sample_computation_times = [r['sample_computation_time'] for r in all_results if r['sample_computation_time'] > 0]
+        if sample_computation_times:
+            print(f"Mean Computation Time per Sample: {np.mean(sample_computation_times):.4f}s ± {np.std(sample_computation_times):.4f}s")
+        
+        # Print prediction metrics summary (steps 10-50 only)
+        if config.testing.receding_horizon.compute_prediction_metrics:
+            ade_values = [r['prediction_metrics'].get('ade', float('inf')) for r in all_results if r['prediction_metrics'].get('ade', float('inf')) != float('inf')]
+            fde_values = [r['prediction_metrics'].get('fde', float('inf')) for r in all_results if r['prediction_metrics'].get('fde', float('inf')) != float('inf')]
+            
+            if ade_values:
+                print(f"ADE (steps {T_observation}-{T_total}): {np.mean(ade_values):.4f} ± {np.std(ade_values):.4f}")
+            if fde_values:
+                print(f"FDE (steps {T_observation}-{T_total}): {np.mean(fde_values):.4f} ± {np.std(fde_values):.4f}")
+        
+        # Print planning metrics summary (steps 10-50 only)
+        if config.testing.receding_horizon.compute_planning_metrics:
+            nav_cost_values = [r['planning_metrics'].get('navigation_cost', float('inf')) for r in all_results if r['planning_metrics'].get('navigation_cost', float('inf')) != float('inf')]
+            safety_cost_values = [r['planning_metrics'].get('safety_cost', float('inf')) for r in all_results if r['planning_metrics'].get('safety_cost', float('inf')) != float('inf')]
+            control_cost_values = [r['planning_metrics'].get('control_cost', float('inf')) for r in all_results if r['planning_metrics'].get('control_cost', float('inf')) != float('inf')]
+            
+            if nav_cost_values:
+                print(f"Navigation Cost (steps {T_observation}-{T_total}): {np.mean(nav_cost_values):.4f} ± {np.std(nav_cost_values):.4f}")
+            if safety_cost_values:
+                print(f"Safety Cost (steps {T_observation}-{T_total}): {np.mean(safety_cost_values):.4f} ± {np.std(safety_cost_values):.4f}")
+            if control_cost_values:
+                print(f"Control Cost (steps {T_observation}-{T_total}): {np.mean(control_cost_values):.4f} ± {np.std(control_cost_values):.4f}")
     
     print(f"Results saved to: {output_dir}")
     
@@ -1188,53 +1438,84 @@ if __name__ == "__main__":
     print("RECEDING HORIZON TESTING WITH GOAL INFERENCE AND PLAYER SELECTION MODELS")
     print("=" * 80)
     
-    # Model paths - PSN from goal_true directory, Goal inference from goal_inference_gru directory
-    # PSN was trained with true goals, so load from goal_true_xxx directory
-    psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/psn_gru_true_goals_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
+    # Load configuration
+    use_baseline = config.testing.receding_horizon.use_baseline
+    baseline_mode = config.testing.receding_horizon.baseline_mode
+    goal_source = config.testing.receding_horizon.goal_source
     
-    # Goal inference model from goal_inference_gru_xxx directory
-    goal_model_path = f"log/goal_inference_rh_gru_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_rh_best_model.pkl"
+    # Initialize model paths
+    psn_model_path = None
+    goal_model_path = None
     
-    # Check if models exist
-    if psn_model_path is None or not os.path.exists(psn_model_path):
-        print(f"Error: PSN model not found at: {psn_model_path}")
-        print("Please train a PSN model first using: python3 player_selection_network/psn_training_with_pretrained_goals.py")
-        exit(1)
+    # Set goal model path if goal source is goal_inference (regardless of baseline mode)
+    if goal_source == "goal_inference":
+        goal_model_path = f"log/goal_inference_rh_gru_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_rh_best_model.pkl"
+        
+        # Check if goal model exists
+        if not os.path.exists(goal_model_path):
+            print(f"Error: Goal inference model not found at: {goal_model_path}")
+            print("Please train a goal inference model first using: python3 goal_inference/pretrain_goal_inference.py")
+            exit(1)
     
-    if goal_model_path is None or not os.path.exists(goal_model_path):
-        print(f"Error: Goal inference model not found at: {goal_model_path}")
-        print("Please train a goal inference model first using: python3 goal_inference/pretrain_goal_inference.py")
-        exit(1)
+    if not use_baseline:
+        # Model paths - PSN from goal_true directory
+        # PSN was trained with true goals, so load from goal_true_xxx directory
+        psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/psn_gru_true_goals_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
+        
+        # Check if PSN model exists
+        if not os.path.exists(psn_model_path):
+            print(f"Error: PSN model not found at: {psn_model_path}")
+            print("Please train a PSN model first using: python3 player_selection_network/psn_training_with_pretrained_goals.py")
+            exit(1)
     
     # Use PSN-specific testing data directory (receding horizon trajectories)
     reference_file = config.testing.psn_data_dir
     
-    # Create output directory under the PSN model directory based on goal source and input method
-    psn_model_dir = os.path.dirname(psn_model_path)
-    goal_source = config.testing.receding_horizon.goal_source
-    
-    if goal_source == "true_goals":
-        output_dir = os.path.join(psn_model_dir, "receding_horizon_results_goal_true")
-    elif goal_source == "goal_inference":
-        # Check input method for goal inference
-        input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
-        if input_method == "sliding_window":
-            output_dir = os.path.join(psn_model_dir, "receding_horizon_results_goal_inference_sliding_window")
-        else:  # first_steps
-            output_dir = os.path.join(psn_model_dir, "receding_horizon_results_goal_inference")
+    # Create output directory based on configuration with method name
+    if use_baseline:
+        # For baseline methods, create hierarchical directory structure
+        method_name = baseline_mode.lower().replace(' ', '_').replace('_', '')
+        
+        # Determine if this is prediction or planning test based on metrics computed
+        test_type = "planning"  # Default to planning since we always compute planning metrics
+        if config.testing.receding_horizon.compute_prediction_metrics and not config.testing.receding_horizon.compute_planning_metrics:
+            test_type = "prediction"
+        
+        # Create directory structure: baseline_results/test_type/N_agents/method_param_goal_source
+        n_agents = config.game.N_agents
+        baseline_param = config.testing.receding_horizon.baseline_parameter
+        goal_suffix = "goal_inference" if goal_source == "goal_inference" else "goal_true"
+        output_dir = f"baseline_results/{test_type}/N_{n_agents}/receding_horizon_results_{method_name}_param_{baseline_param}_{goal_suffix}"
     else:
-        # Fallback to original directory name
-        output_dir = os.path.join(psn_model_dir, config.testing.receding_horizon.output_dir)
+        # For PSN model, create directory under the PSN model directory with method name
+        psn_model_dir = os.path.dirname(psn_model_path)
+        
+        # Extract method name from PSN model path
+        psn_model_name = os.path.basename(psn_model_path).replace('.pkl', '')
+        
+        if goal_source == "true_goals":
+            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_goal_true_{psn_model_name}")
+        elif goal_source == "goal_inference":
+            # Always use first_steps for goal inference
+            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_goal_inference_{psn_model_name}")
+        else:
+            # Fallback to original directory name with method name
+            output_dir = os.path.join(psn_model_dir, f"{config.testing.receding_horizon.output_dir}_{psn_model_name}")
+    
     os.makedirs(output_dir, exist_ok=True)
     
-    print(f"Using models:")
-    print(f"  PSN Model: {psn_model_path}")
-    print(f"  Goal Model: {goal_model_path}")
+    print(f"Configuration:")
+    print(f"  Use Baseline: {use_baseline}")
+    if use_baseline:
+        print(f"  Baseline Mode: {baseline_mode}")
+        print(f"  Baseline Parameter: {config.testing.receding_horizon.baseline_parameter}")
+    else:
+        print(f"  PSN Model: {psn_model_path}")
+        print(f"  Goal Model: {goal_model_path}")
     print(f"  Reference Data: {reference_file}")
     print(f"  Goal Source: {goal_source}")
-    if goal_source == "goal_inference":
-        input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
-        print(f"  Goal Inference Input Method: {input_method}")
+    print(f"  Number of Samples: {config.testing.receding_horizon.num_samples}")
+    print(f"  Use Later Samples: {config.testing.receding_horizon.use_later_samples}")
     print(f"  Results will be saved to: {output_dir}")
     
     # Run testing
@@ -1243,7 +1524,9 @@ if __name__ == "__main__":
         goal_model_path=goal_model_path,
         reference_file=reference_file,
         output_dir=output_dir,
-        num_samples=config.testing.receding_horizon.num_samples
+        num_samples=config.testing.receding_horizon.num_samples,
+        use_baseline=use_baseline,
+        baseline_mode=baseline_mode
     )
     
     # Create summary file explaining the model relationships
@@ -1252,32 +1535,87 @@ if __name__ == "__main__":
         f.write("Receding Horizon Testing with Integrated Models\n")
         f.write("=" * 60 + "\n\n")
         f.write("Model Configuration:\n")
-        f.write(f"  - Goal Inference Model: {goal_model_path}\n")
-        f.write(f"  - PSN Model: {psn_model_path}\n")
+        if use_baseline:
+            f.write(f"  - Baseline Mode: {baseline_mode}\n")
+            f.write(f"  - Baseline Parameter: {config.testing.receding_horizon.baseline_parameter}\n")
+        else:
+            f.write(f"  - Goal Inference Model: {goal_model_path}\n")
+            f.write(f"  - PSN Model: {psn_model_path}\n")
         f.write(f"  - Reference Data: {reference_file}\n\n")
         f.write("Test Configuration:\n")
+        f.write(f"  - Use Baseline: {use_baseline}\n")
         f.write(f"  - Goal source: {config.testing.receding_horizon.goal_source}\n")
-        if config.testing.receding_horizon.goal_source == "goal_inference":
-            input_method = getattr(config.testing.receding_horizon, 'goal_inference_input_method', 'first_steps')
-            f.write(f"  - Goal inference input method: {input_method}\n")
         f.write(f"  - Number of samples: {config.testing.receding_horizon.num_samples}\n")
+        f.write(f"  - Use later samples: {config.testing.receding_horizon.use_later_samples}\n")
         f.write(f"  - Receding horizon iterations: {T_receding_horizon_iterations}\n")
         f.write(f"  - Planning horizon per game: {T_receding_horizon_planning}\n")
         f.write(f"  - Total trajectory steps: {T_total}\n")
         f.write(f"  - Observation steps: {T_observation}\n")
-        f.write(f"  - Number of agents: {n_agents}\n\n")
+        f.write(f"  - Number of agents: {n_agents}\n")
+        f.write(f"  - Compute prediction metrics: {config.testing.receding_horizon.compute_prediction_metrics}\n")
+        f.write(f"  - Compute planning metrics: {config.testing.receding_horizon.compute_planning_metrics}\n\n")
         f.write("Results:\n")
         f.write(f"  - Successfully tested: {len(results)} samples\n")
         f.write(f"  - Output directory: {output_dir}\n\n")
-        f.write("Directory Structure:\n")
-        f.write(f"  Goal Inference: {os.path.dirname(goal_model_path)}\n")
-        f.write(f"  PSN Training: {psn_model_dir}\n")
-        f.write(f"  Receding Horizon Test: {output_dir}\n")
+        
+        # Add metrics summary if available (steps 10-50 only)
+        if results:
+            f.write("Metrics Summary (steps 10-50, receding horizon planning phase only):\n")
+            # Prediction metrics
+            if config.testing.receding_horizon.compute_prediction_metrics:
+                ade_values = [r['prediction_metrics'].get('ade', float('inf')) for r in results if r['prediction_metrics'].get('ade', float('inf')) != float('inf')]
+                fde_values = [r['prediction_metrics'].get('fde', float('inf')) for r in results if r['prediction_metrics'].get('fde', float('inf')) != float('inf')]
+                if ade_values:
+                    f.write(f"  - ADE (steps {T_observation}-{T_total}): {np.mean(ade_values):.4f} ± {np.std(ade_values):.4f}\n")
+                if fde_values:
+                    f.write(f"  - FDE (steps {T_observation}-{T_total}): {np.mean(fde_values):.4f} ± {np.std(fde_values):.4f}\n")
+            
+            # Planning metrics
+            if config.testing.receding_horizon.compute_planning_metrics:
+                nav_cost_values = [r['planning_metrics'].get('navigation_cost', float('inf')) for r in results if r['planning_metrics'].get('navigation_cost', float('inf')) != float('inf')]
+                safety_cost_values = [r['planning_metrics'].get('safety_cost', float('inf')) for r in results if r['planning_metrics'].get('safety_cost', float('inf')) != float('inf')]
+                control_cost_values = [r['planning_metrics'].get('control_cost', float('inf')) for r in results if r['planning_metrics'].get('control_cost', float('inf')) != float('inf')]
+                if nav_cost_values:
+                    f.write(f"  - Navigation Cost (steps {T_observation}-{T_total}): {np.mean(nav_cost_values):.4f} ± {np.std(nav_cost_values):.4f}\n")
+                if safety_cost_values:
+                    f.write(f"  - Safety Cost (steps {T_observation}-{T_total}): {np.mean(safety_cost_values):.4f} ± {np.std(safety_cost_values):.4f}\n")
+                if control_cost_values:
+                    f.write(f"  - Control Cost (steps {T_observation}-{T_total}): {np.mean(control_cost_values):.4f} ± {np.std(control_cost_values):.4f}\n")
+            
+            # Computation time
+            computation_times = [r['mean_computation_time'] for r in results if r['mean_computation_time'] > 0]
+            if computation_times:
+                f.write(f"  - Mean Computation Time per Receding Horizon Step: {np.mean(computation_times):.4f}s ± {np.std(computation_times):.4f}s\n")
+            
+            # Per-sample computation time
+            sample_computation_times = [r['sample_computation_time'] for r in results if r['sample_computation_time'] > 0]
+            if sample_computation_times:
+                f.write(f"  - Mean Computation Time per Sample: {np.mean(sample_computation_times):.4f}s ± {np.std(sample_computation_times):.4f}s\n")
+        
+        f.write("\nDirectory Structure:\n")
+        if not use_baseline:
+            f.write(f"  Goal Inference: {os.path.dirname(goal_model_path)}\n")
+            f.write(f"  PSN Training: {os.path.dirname(psn_model_path)}\n")
+            f.write(f"  Receding Horizon Test: {output_dir}\n")
+        else:
+            f.write(f"  Baseline Results → {test_type} → N_{n_agents} → {os.path.basename(output_dir)}\n")
+            f.write(f"  Method: {baseline_mode}\n")
+            f.write(f"  Parameter: {baseline_param}\n")
+            f.write(f"  Goal Source: {goal_source}\n")
     
     print(f"\nReceding horizon testing completed!")
     print(f"Generated {len(results)} test results with integrated models.")
     print(f"Results saved to: {output_dir}")
     print(f"Summary file: {summary_path}")
     print(f"\nDirectory organization:")
-    print(f"  Goal Inference → PSN Training → Receding Horizon Test")
-    print(f"  {os.path.basename(os.path.dirname(goal_model_path))} → {os.path.basename(psn_model_dir)} → {os.path.basename(output_dir)}")
+    if use_baseline:
+        print(f"  Baseline Results → {test_type} → N_{n_agents} → {os.path.basename(output_dir)}")
+        print(f"  Method: {baseline_mode}")
+        print(f"  Parameter: {baseline_param}")
+        print(f"  Goal Source: {goal_source}")
+    else:
+        print(f"  Goal Inference → PSN Training → Receding Horizon Test")
+        if goal_model_path and psn_model_path:
+            print(f"  {os.path.basename(os.path.dirname(goal_model_path))} → {os.path.basename(os.path.dirname(psn_model_path))} → {os.path.basename(output_dir)}")
+        else:
+            print(f"  Models → {os.path.basename(output_dir)}")

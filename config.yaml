@@ -241,22 +241,27 @@ testing:
     # Two-phase approach configuration
     initial_stabilization_iterations: 0  # No stabilization period - use PSN and goal inference from step 10
     mask_threshold: 0.5                  # Threshold for agent selection (0.05 -> 0.3)
-    mask_sparsity_calculation: "fraction" # How to calculate mask sparsity ["fraction", "ratio"]
     
     # Goal source configuration for testing
     # Choose between true goals and goal inference for PSN testing:
     # - "true_goals": Use ground truth goals for PSN testing, save to receding_horizon_results_goal_true
     # - "goal_inference": Use goal inference model predictions, save to receding_horizon_results_goal_inference
-    goal_source: "goal_inference"            # ["true_goals", "goal_inference"]
+    goal_source: "true_goals"            # ["true_goals", "goal_inference"]
     
-    # Goal inference input method (only used when goal_source is "goal_inference")
-    # - "first_steps": Use first 10 steps (observation period) as input
-    # - "sliding_window": Use sliding window of latest 10 steps as input (more realistic)
-    goal_inference_input_method: "first_steps"  # ["first_steps", "sliding_window"]
     
     # Testing configuration
-    num_samples: 10                      # Number of samples to test (2 -> 10)
+    num_samples: 2                     # Number of samples to test (use later 128 samples)
+    use_later_samples: true              # Whether to use later samples (samples 384-511) instead of first samples
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
+    
+    # Baseline testing configuration
+    use_baseline: true                  # Whether to use baseline methods instead of PSN model
+    baseline_mode: "Control Barrier Function"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
+    baseline_parameter: 2                # Parameter for baseline method (e.g., number of neighbors, distance threshold)
+    
+    # Evaluation metrics configuration
+    compute_prediction_metrics: true     # Whether to compute prediction metrics (ADE, FDE)
+    compute_planning_metrics: true       # Whether to compute planning metrics (nav_cost, safety_cost, control_cost)
     
     # Visualization settings
     create_gif: true                     # Whether to create trajectory GIFs
