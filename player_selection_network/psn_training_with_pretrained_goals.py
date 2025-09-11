@@ -1791,18 +1791,24 @@ def load_trained_models(psn_model_path: str, goal_model_path: str, obs_input_typ
     psn_trained_state = flax.serialization.from_bytes(psn_model, psn_model_bytes)
     print("✓ PSN model loaded successfully")
     
-    print(f"Loading trained goal inference model from: {goal_model_path}")
-    
-    # Load the goal inference model bytes
-    with open(goal_model_path, 'rb') as f:
-        goal_model_bytes = pickle.load(f)
-    
-    # Create the goal inference model
-    goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims, obs_input_type=obs_input_type)
-    
-    # Deserialize the goal inference state
-    goal_trained_state = flax.serialization.from_bytes(goal_model, goal_model_bytes)
-    print("✓ Goal inference model loaded successfully")
+    # Load goal inference model only if path is provided
+    if goal_model_path is not None:
+        print(f"Loading trained goal inference model from: {goal_model_path}")
+        
+        # Load the goal inference model bytes
+        with open(goal_model_path, 'rb') as f:
+            goal_model_bytes = pickle.load(f)
+        
+        # Create the goal inference model
+        goal_model = GoalInferenceNetwork(hidden_dims=goal_inference_hidden_dims, obs_input_type=obs_input_type)
+        
+        # Deserialize the goal inference state
+        goal_trained_state = flax.serialization.from_bytes(goal_model, goal_model_bytes)
+        print("✓ Goal inference model loaded successfully")
+    else:
+        print("No goal inference model provided (using true goals)")
+        goal_model = None
+        goal_trained_state = None
     
     return psn_model, psn_trained_state, goal_model, goal_trained_state
 

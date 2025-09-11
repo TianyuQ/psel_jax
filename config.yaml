@@ -34,7 +34,7 @@ game:
   T_observation: 10         # Number of steps to observe before solving the game
 
   # Agent configuration
-  N_agents: 4               # Total number of agents in the game
+  N_agents: 10               # Total number of agents in the game
   ego_agent_id: 0           # ID of the ego agent (usually 0)
   
   # State and control dimensions
@@ -139,8 +139,8 @@ psn:
   num_epochs: 100            # Number of training epochs
   
   # Loss function weights
-  sigma1: 0.45              # Weight for mask sparsity loss
-  sigma2: 0.45               # Weight for mask diversity loss
+  sigma1: 0.075              # Weight for mask sparsity loss
+  sigma2: 0.075               # Weight for mask diversity loss
   
   # Goal source configuration
   # IMPORTANT: This setting affects testing behavior:
@@ -238,30 +238,45 @@ testing:
   
   # Receding horizon testing parameters
   receding_horizon:
-    # Two-phase approach configuration
-    initial_stabilization_iterations: 0  # No stabilization period - use PSN and goal inference from step 10
-    mask_threshold: 0.5                  # Threshold for agent selection (0.05 -> 0.3)
+    # Test type configuration - Choose the main test category
+    # 1. prediction_test: All agents' goals are not known (test goal inference + player selection)
+    # 2. planning_test: Ego agent's goal is always known (test player selection only)
+    test_type: "prediction_test"         # ["prediction_test", "planning_test"]
     
     # Goal source configuration for testing
-    # Choose between true goals and goal inference for PSN testing:
-    # - "true_goals": Use ground truth goals for PSN testing, save to receding_horizon_results_goal_true
-    # - "goal_inference": Use goal inference model predictions, save to receding_horizon_results_goal_inference
+    # 1a. prediction_test + true_goals: Use true goals for all agents
+    # 1b. prediction_test + goal_inference: Use inferred goals for all agents  
+    # 2a. planning_test + true_goals: Use true goals for all agents
+    # 2b. planning_test + goal_inference: Use inferred goals for all agents
     goal_source: "true_goals"            # ["true_goals", "goal_inference"]
     
+    # Two-phase approach configuration
+    initial_stabilization_iterations: 0  # No stabilization period - use PSN and goal inference from step 10
+    
+    # Player selection configuration for PSN testing (NOT used for baseline methods)
+    # Selection method: "threshold" or "rank" - only applies when use_baseline=False
+    # - "threshold": Select agents with mask values > mask_threshold (default behavior)
+    # - "rank": Select top N agents based on mask values (rank = N means select N-1 other agents)
+    # Note: Baseline methods use their own internal selection logic and ignore these parameters
+    selection_method: "threshold"        # ["threshold", "rank"] - only for PSN methods
+    mask_threshold: 0.5                  # Threshold for agent selection when using "threshold" method
+    rank: 3                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
     
     # Testing configuration
-    num_samples: 2                     # Number of samples to test (use later 128 samples)
+    num_samples: 10                     # Number of samples to test (use later 128 samples)
     use_later_samples: true              # Whether to use later samples (samples 384-511) instead of first samples
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Baseline testing configuration
     use_baseline: true                  # Whether to use baseline methods instead of PSN model
-    baseline_mode: "Control Barrier Function"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
-    baseline_parameter: 2                # Parameter for baseline method (e.g., number of neighbors, distance threshold)
+    baseline_mode: "Nearest Neighbor"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
+    baseline_parameter: 4                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
     
-    # Evaluation metrics configuration
-    compute_prediction_metrics: true     # Whether to compute prediction metrics (ADE, FDE)
-    compute_planning_metrics: true       # Whether to compute planning metrics (nav_cost, safety_cost, control_cost)
+    # Evaluation metrics configuration - automatically set based on test_type
+    # prediction_test: compute_prediction_metrics=true, compute_planning_metrics=true
+    # planning_test: compute_prediction_metrics=false, compute_planning_metrics=true
+    compute_prediction_metrics: true     # Whether to compute prediction metrics (ADE, FDE) - auto-set based on test_type
+    compute_planning_metrics: true       # Whether to compute planning metrics (nav_cost, safety_cost, control_cost) - always true
     
     # Visualization settings
     create_gif: true                     # Whether to create trajectory GIFs
@@ -285,40 +300,6 @@ testing:
   # Output directories
   results_dir: "test_results"       # Directory for test results
   plots_dir: "test_plots"           # Directory for test plots
-
-# ============================================================================
-# UTILITY FUNCTIONS FOR MODEL PATHS
-# ============================================================================
-# These functions can be implemented in your code to automatically resolve model paths
-# based on the current configuration parameters
-
-# Example Python function to resolve model paths:
-# def get_model_paths(config):
-#     """Get model paths based on current configuration."""
-#     psn_model_path = config.testing.psn_model_template.format(
-#         N_agents=config.game.N_agents,
-#         T_total=config.game.T_total,
-#         T_observation=config.game.T_observation,
-#         learning_rate=config.goal_inference.learning_rate,
-#         batch_size=config.goal_inference.batch_size,
-#         goal_loss_weight=config.goal_inference.goal_loss_weight,
-#         num_epochs=config.goal_inference.num_epochs,
-#         sigma1=config.psn.sigma1,
-#         sigma2=config.psn.sigma2,
-#         psn_epochs=config.psn.num_epochs
-#     )
-#     
-#     goal_inference_model_path = config.testing.goal_inference_model_template.format(
-#         N_agents=config.game.N_agents,
-#         T_total=config.game.T_total,
-#         T_observation=config.goal_inference.observation_length,  # Use observation_length, not game.T_observation
-#         learning_rate=config.goal_inference.learning_rate,
-#         batch_size=config.goal_inference.batch_size,
-#         goal_loss_weight=config.goal_inference.goal_loss_weight,
-#         num_epochs=config.goal_inference.num_epochs
-#     )
-#     
-#     return psn_model_path, goal_inference_model_path
 
 # ============================================================================
 # PATHS AND DIRECTORIES
@@ -364,25 +345,3 @@ device:
   
   # JAX configuration
   jax_platform_name: null  # JAX platform name (null = auto-detect)
-
-# ============================================================================
-# DYNAMIC CONFIGURATION HELPERS
-# ============================================================================
-# These values are automatically computed based on N_agents
-# Access them in your code as: config.goal_inference.hidden_dims_4p or config.goal_inference.hidden_dims_10p
-# Then select based on N_agents:
-#   hidden_dims = config.goal_inference.hidden_dims_4p if config.game.N_agents == 4 else config.goal_inference.hidden_dims_10p
-
-# Model path templates can be resolved programmatically:
-#   psn_model_path = config.testing.psn_model_template.format(
-#       N_agents=config.game.N_agents,
-#       T_total=config.game.T_total,
-#       T_observation=config.goal_inference.observation_length,  # Use observation_length, not game.T_observation
-#       learning_rate=config.goal_inference.learning_rate,
-#       batch_size=config.goal_inference.batch_size,
-#       goal_loss_weight=config.goal_inference.goal_loss_weight,
-#       num_epochs=config.goal_inference.num_epochs,
-#       sigma1=config.psn.sigma1,
-#       sigma2=config.psn.sigma2,
-#       psn_epochs=config.psn.num_epochs
-#   )

@@ -52,6 +52,54 @@ setup_jax_config()
 device = get_device_config()
 print(f"Using device: {device}")
 
+# ============================================================================
+# PLAYER SELECTION UTILITIES
+# ============================================================================
+
+def select_agents_by_mask(predicted_mask: jnp.ndarray, 
+                         selection_method: str = "threshold",
+                         mask_threshold: float = 0.5,
+                         rank: int = 3) -> Tuple[jnp.ndarray, int, float]:
+    """
+    Select agents based on predicted mask using either threshold or rank method.
+    
+    Args:
+        predicted_mask: Mask values for all other agents (N_agents - 1,)
+        selection_method: "threshold" or "rank"
+        mask_threshold: Threshold for selection when using "threshold" method
+        rank: Total number of agents when using "rank" method (rank=3 means 3-player game)
+    
+    Returns:
+        Tuple of (selected_agent_indices, num_selected, mask_sparsity)
+    """
+    n_other_agents = len(predicted_mask)
+    
+    if selection_method == "threshold":
+        # Original threshold-based selection
+        selected_agents = jnp.where(predicted_mask > mask_threshold)[0]
+        num_selected = len(selected_agents)
+        mask_sparsity = num_selected / n_other_agents
+        
+    elif selection_method == "rank":
+        # Rank-based selection: select top (rank - 1) other agents
+        # rank = 3 means 3-player game, so select 2 other agents
+        num_to_select = max(0, min(rank - 1, n_other_agents))
+        
+        if num_to_select == 0:
+            selected_agents = jnp.array([])
+        else:
+            # Get indices of top agents by mask value
+            top_indices = jnp.argsort(predicted_mask)[-num_to_select:]
+            selected_agents = top_indices
+        
+        num_selected = len(selected_agents)
+        mask_sparsity = num_selected / n_other_agents
+        
+    else:
+        raise ValueError(f"Invalid selection_method: {selection_method}. Must be 'threshold' or 'rank'")
+    
+    return selected_agents, num_selected, mask_sparsity
+
 # Extract parameters from configuration
 dt = config.game.dt
 T_receding_horizon_planning = config.game.T_receding_horizon_planning  # Planning horizon for each individual game
@@ -763,20 +811,26 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 predicted_mask = psn_model.apply({'params': psn_trained_state['params']}, obs_input, deterministic=True)
                 predicted_mask = predicted_mask[0]  # Remove batch dimension
             
-            # Apply threshold to get selected agents
-            mask_threshold = config.testing.receding_horizon.mask_threshold
-            selected_agents = jnp.where(predicted_mask > mask_threshold)[0]
-            num_selected = len(selected_agents)
-            
-            # Calculate mask sparsity based on configuration
-            mask_sparsity = num_selected / (n_agents - 1)
+            # Apply selection method to get selected agents (only for PSN methods)
+            if not use_baseline:
+                # PSN method: use configurable selection method (threshold or rank)
+                selection_method = config.testing.receding_horizon.selection_method
+                mask_threshold = config.testing.receding_horizon.mask_threshold
+                rank = config.testing.receding_horizon.rank
+                
+                selected_agents, num_selected, mask_sparsity = select_agents_by_mask(
+                    predicted_mask, selection_method, mask_threshold, rank)
+            else:
+                # Baseline method: use simple threshold (baseline already returns binary mask)
+                selected_agents = jnp.where(predicted_mask > 0.5)[0]  # Baseline returns 0/1 values
+                num_selected = len(selected_agents)
+                mask_sparsity = num_selected / (n_agents - 1)
         
         # Step 3: Solve receding horizon game with predicted goals
-        # Apply masking: only include agents above threshold (EXACTLY like training script)
+        # Apply masking: only include selected agents (EXACTLY like training script)
         if iteration >= config.testing.receding_horizon.initial_stabilization_iterations and 'predicted_mask' in locals() and predicted_mask is not None:
-            # Filter agents and goals based on mask threshold (only after initial stabilization)
-            mask_threshold = config.testing.receding_horizon.mask_threshold
-            selected_agents = jnp.where(predicted_mask > mask_threshold)[0]
+            # Filter agents and goals based on selection method (only after initial stabilization)
+            # selected_agents already computed above using the selection method
             
             # Ensure ego agent (agent 0) is always included
             if 0 not in selected_agents:
@@ -1007,231 +1061,15 @@ def save_test_results(results: Dict[str, Any], save_dir: str) -> str:
     return str(filepath)
 
 
-def create_receding_horizon_gif(sample_data: Dict[str, Any], 
-                                results: Dict[str, Any], 
-                                sample_id: int, 
-                                save_dir: str,
-                                normalized_sample_data: Dict[str, Any] = None) -> str:
-    """
-    Create a GIF visualization of the receding horizon trajectory evolution.
-    
-    Args:
-        sample_data: Reference trajectory sample data
-        results: Test results containing receding horizon data
-        sample_id: Sample identifier
-        save_dir: Directory to save the GIF
-        normalized_sample_data: Normalized sample data (if None, will normalize sample_data)
-    
-    Returns:
-        Path to the saved GIF file
-    """
-    print(f"      Creating trajectory visualization GIF...")
-    
-    if 'final_game_state' not in results:
-        print(f"      Warning: No game state data for sample {sample_id}")
-        return ""
-    
-    game_state = results['final_game_state']
-    if not game_state.get('trajectories'):
-        print(f"      Warning: Empty game state for sample {sample_id}")
-        return ""
-    
-    # Use normalized data if provided, otherwise normalize the sample data
-    if normalized_sample_data is None:
-        normalized_sample_data = normalize_sample_data(sample_data)
-    
-    # Create frames for the GIF showing all trajectory steps
-    frames = []
-    
-    # Color scheme
-    ego_color = 'darkblue'
-    other_agent_color = 'gray'
-    selected_color = 'red'
-    goal_prediction_color = 'orange'
-    
-    # Create exactly T_total frames (steps 1-T_total)
-    total_steps = T_total
-    
-    # Create frames for all steps
-    for step in range(total_steps):
-        # Create frame for this step
-        fig, ax = plt.subplots(1, 1, figsize=(12, 10))
-        ax.set_aspect('equal')
-        ax.set_xlim(-3.5, 3.5)
-        ax.set_ylim(-3.5, 3.5)
-        
-        # Title with step information
-        if step < T_observation:
-            step_title = f'Sample {sample_id+1}: Step {step+1}/{T_total}\nPhase 1: Ground Truth Trajectories'
-        else:
-            step_title = f'Sample {sample_id+1}: Step {step+1}/{T_total}\nPhase 2: Receding Horizon with Models'
-        ax.set_title(step_title)
-        ax.set_xlabel('X Position')
-        ax.set_ylabel('Y Position')
-        ax.grid(True, alpha=0.3)
-        
-        # Plot trajectories up to current step for all agents
-        # Visualization logic:
-        # - Ego agent: Shows both computed trajectory (from solver) AND ground truth trajectory
-        # - Other agents: Only show ground truth trajectories (not from solver)
-        for i in range(n_agents):
-            agent_key = f"agent_{i}"
-            agent_states = game_state["trajectories"][agent_key]["states"]
-            
-            # Ensure we don't go beyond available trajectory data
-            max_available_steps = len(agent_states)
-            actual_step = min(step, max_available_steps - 1)
-            
-            if actual_step >= 0:
-                if i == 0:  # Ego agent - plot both ground truth and computed trajectories
-                    # Plot ground truth trajectory (black dashed)
-                    sample_agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
-                    if len(sample_agent_states) > 0:
-                        sample_traj = np.array(sample_agent_states[:T_total])
-                        ax.plot(sample_traj[:, 0], sample_traj[:, 1], '--', 
-                                 color='black', alpha=0.8, linewidth=2, 
-                                 label=f'Ego Agent {i} (Ground Truth)')
-                    
-                    # Plot computed trajectory (blue solid)
-                    agent_traj = np.array(agent_states[:actual_step+1])
-                    if len(agent_traj) > 0:
-                        ax.plot(agent_traj[:, 0], agent_traj[:, 1], '-', 
-                                 color='blue', alpha=0.9, linewidth=3, 
-                                 label=f'Ego Agent {i} (Computed)')
-                        
-                        # Force plot limits to include both trajectories
-                        all_x = np.concatenate([sample_traj[:, 0], agent_traj[:, 0]])
-                        all_y = np.concatenate([sample_traj[:, 1], agent_traj[:, 1]])
-                        ax.set_xlim(min(ax.get_xlim()[0], all_x.min() - 0.1),
-                                   max(ax.get_xlim()[1], all_x.max() + 0.1))
-                        ax.set_ylim(min(ax.get_ylim()[0], all_y.min() - 0.1),
-                                   max(ax.get_ylim()[1], all_y.max() + 0.1))
-                else:  # Other agents - show ground truth trajectories (not from solver)
-                    # Plot ground truth trajectory from sample data
-                    sample_agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
-                    if len(sample_agent_states) > 0:
-                        sample_traj = np.array(sample_agent_states[:T_total])
-                        ax.plot(sample_traj[:, 0], sample_traj[:, 1], '-', 
-                                 color=other_agent_color, alpha=0.6, linewidth=1, 
-                                 label=f'Agent {i} (Ground Truth)')
-        
-        # Plot current positions with selection coloring
-        # Note: Position markers show PSN selection status, but trajectories are as described above
-        for i in range(n_agents):
-            agent_key = f"agent_{i}"
-            agent_states = game_state["trajectories"][agent_key]["states"]
-            
-            # Ensure we don't go beyond available trajectory data
-            max_available_steps = len(agent_states)
-            actual_step = min(step, max_available_steps - 1)
-            
-            if actual_step >= 0:
-                current_pos = np.array(agent_states[actual_step][:2])
-                
-                # Determine if this agent is selected by PSN (for non-ego agents)
-                # This is just for visualization coloring - all agents use ground truth trajectories
-                is_selected = False
-                if i > 0 and step >= T_observation:  # Only check selection after observation phase
-                    # Find the iteration result for this step
-                    iteration_idx = step - T_observation
-                    if iteration_idx < len(results['receding_horizon_results']):
-                        iteration_result = results['receding_horizon_results'][iteration_idx]
-                        predicted_mask = iteration_result['predicted_mask']
-                        mask_threshold = config.testing.receding_horizon.mask_threshold
-                        mask_value = predicted_mask[i-1] if i-1 < len(predicted_mask) else 'N/A'
-                        is_selected = mask_value > mask_threshold
-                        
-                if i == 0:  # Ego agent
-                    ax.plot(current_pos[0], current_pos[1], 'o', 
-                             color=ego_color, markersize=10, alpha=0.8)
-                else:  # Other agents - color based on selection
-                    if is_selected:
-                        ax.plot(current_pos[0], current_pos[1], 'o', 
-                                 color=selected_color, markersize=8, alpha=0.8)
-                        # Add text label with selection indicator
-                        ax.text(current_pos[0] + 0.1, current_pos[1] + 0.1, f'{i}*', 
-                                fontsize=12, ha='left', va='bottom', 
-                                bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-                    else:
-                        ax.plot(current_pos[0], current_pos[1], 'o', 
-                                 color=other_agent_color, markersize=8, alpha=0.7)
-                        # Add text label
-                        ax.text(current_pos[0] + 0.1, current_pos[1] + 0.1, f'{i}', 
-                                fontsize=12, ha='left', va='bottom', 
-                                bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-        # Plot goals and goal predictions
-        true_goals = extract_reference_goals(normalized_sample_data)
-        
-        # Plot true goals
-        for j in range(n_agents):
-            if j == 0:  # Ego agent goal
-                ax.plot(true_goals[j][0], true_goals[j][1], 's', 
-                         color=ego_color, markersize=12, alpha=0.8, label=f'Ego Agent {j} Goal (True)')
-            else:  # Other agent goals
-                ax.plot(true_goals[j][0], true_goals[j][1], 's', 
-                         color=other_agent_color, markersize=10, alpha=0.6, label=f'Agent {j} Goal (True)')
-        
-        # Plot predicted goals at current iteration (if available)
-        if step >= T_observation:  # Only show predictions after observation phase
-            iteration_idx = step - T_observation
-            if iteration_idx < len(results['receding_horizon_results']):
-                iteration_result = results['receding_horizon_results'][iteration_idx]
-                predicted_goals = iteration_result['predicted_goals']
-                
-                for j in range(n_agents):
-                    if j == 0:  # Ego agent predicted goal
-                        ax.plot(predicted_goals[j][0], predicted_goals[j][1], '^', 
-                                 color=goal_prediction_color, markersize=10, alpha=0.8, 
-                                 label=f'Ego Agent {j} Goal (Predicted)')
-                    else:  # Other agent predicted goals
-                        ax.plot(predicted_goals[j][0], predicted_goals[j][1], '^', 
-                                 color=goal_prediction_color, markersize=8, alpha=0.6, 
-                                 label=f'Agent {j} Goal (Predicted)')
-        
-        # Add legend
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        
-        plt.tight_layout()
-        
-        # Convert plot to image
-        canvas = plt.get_current_fig_manager().canvas
-        canvas.draw()
-        # Use modern buffer_rgba() instead of deprecated tostring_rgb()
-        image = np.frombuffer(canvas.buffer_rgba(), dtype='uint8')
-        image = image.reshape(canvas.get_width_height()[::-1] + (4,))  # RGBA has 4 channels
-        # Convert RGBA to RGB by dropping alpha channel
-        image = image[:, :, :3]
-        frames.append(image)
-        
-        plt.close()
-    
-    # Verify we have exactly T_total frames
-    expected_frames = T_total
-    if len(frames) != expected_frames:
-        print(f"      Warning: Expected {expected_frames} frames, but created {len(frames)} frames")
-    
-    # Save as GIF
-    if frames:
-        gif_path = os.path.join(save_dir, f"receding_horizon_test_sample_{sample_id:03d}.gif")
-        import imageio
-        imageio.mimsave(gif_path, frames, 
-                       duration=config.testing.receding_horizon.gif_duration, 
-                       loop=config.testing.receding_horizon.gif_loop)
-        print(f"      GIF saved: {gif_path}")
-        print(f"      Created {len(frames)} frames for all {T_total} steps")
-        return gif_path
-    else:
-        print(f"      Warning: No frames created for GIF")
-        return ""
-
-
 def run_receding_horizon_testing(psn_model_path: str = None, 
                                 goal_model_path: str = None,
                                 reference_file: str = None,
                                 output_dir: str = None,
                                 num_samples: int = None,
                                 use_baseline: bool = None,
-                                baseline_mode: str = None) -> List[Dict[str, Any]]:
+                                baseline_mode: str = None,
+                                test_type: str = None,
+                                goal_source: str = None) -> List[Dict[str, Any]]:
     """
     Run receding horizon testing with goal inference and player selection models.
     
@@ -1243,6 +1081,8 @@ def run_receding_horizon_testing(psn_model_path: str = None,
         num_samples: Number of samples to test (uses config if None)
         use_baseline: Whether to use baseline methods (uses config if None)
         baseline_mode: Baseline method to use (uses config if None)
+        test_type: Test type - "prediction_test" or "planning_test" (uses config if None)
+        goal_source: Goal source - "true_goals" or "goal_inference" (uses config if None)
     
     Returns:
         List of test results for each sample
@@ -1260,34 +1100,52 @@ def run_receding_horizon_testing(psn_model_path: str = None,
         use_baseline = config.testing.receding_horizon.use_baseline
     if baseline_mode is None:
         baseline_mode = config.testing.receding_horizon.baseline_mode
-    
-    # Determine output directory based on goal source and input method if not provided
-    if output_dir is None:
+    if test_type is None:
+        test_type = config.testing.receding_horizon.test_type
+    if goal_source is None:
         goal_source = config.testing.receding_horizon.goal_source
+    
+    # Automatically set metrics based on test type
+    if test_type == "prediction_test":
+        # Prediction test: compute both prediction and planning metrics
+        compute_prediction_metrics = True
+        compute_planning_metrics = True
+    elif test_type == "planning_test":
+        # Planning test: only compute planning metrics (ego goal is known)
+        compute_prediction_metrics = False
+        compute_planning_metrics = True
+    else:
+        raise ValueError(f"Invalid test_type: {test_type}. Must be 'prediction_test' or 'planning_test'")
+    
+    # Update config with computed metrics
+    config.testing.receding_horizon.compute_prediction_metrics = compute_prediction_metrics
+    config.testing.receding_horizon.compute_planning_metrics = compute_planning_metrics
+    
+    # Determine output directory based on test type, goal source and input method if not provided
+    if output_dir is None:
         if use_baseline:
-            # For baseline methods, save to baseline_results directory with method name and goal source
+            # For baseline methods, create hierarchical directory structure
             method_name = baseline_mode.lower().replace(' ', '_').replace('_', '')
-            if goal_source == "goal_inference":
-                output_dir = f"baseline_results/receding_horizon_results_{method_name}_goal_inference"
-            else:
-                output_dir = f"baseline_results/receding_horizon_results_{method_name}_goal_true"
+            baseline_param = config.testing.receding_horizon.baseline_parameter
+            goal_suffix = "goal_inference" if goal_source == "goal_inference" else "goal_true"
+            output_dir = f"baseline_results/{test_type}/N_{config.game.N_agents}/receding_horizon_results_{method_name}_param_{baseline_param}_{goal_suffix}"
         else:
             if goal_source == "true_goals":
                 # Extract method name from PSN model path if available
                 if psn_model_path:
                     psn_model_name = os.path.basename(psn_model_path).replace('.pkl', '')
-                    output_dir = f"receding_horizon_results_goal_true_{psn_model_name}"
+                    output_dir = f"receding_horizon_results_{test_type}_goal_true_{psn_model_name}"
                 else:
-                    output_dir = "receding_horizon_results_goal_true"
+                    output_dir = f"receding_horizon_results_{test_type}_goal_true"
             elif goal_source == "goal_inference":
                 # Always use first_steps for goal inference
                 if psn_model_path:
                     psn_model_name = os.path.basename(psn_model_path).replace('.pkl', '')
-                    output_dir = f"receding_horizon_results_goal_inference_{psn_model_name}"
+                    output_dir = f"receding_horizon_results_{test_type}_goal_inference_{psn_model_name}"
                 else:
-                    output_dir = "receding_horizon_results_goal_inference"
+                    output_dir = f"receding_horizon_results_{test_type}_goal_inference"
             else:
-                output_dir = "receding_horizon_test_results"
+                output_dir = f"receding_horizon_test_results_{test_type}"
     
     # Load models based on goal source and baseline configuration
     psn_model, psn_trained_state, goal_model, goal_trained_state = None, None, None, None
@@ -1366,10 +1224,6 @@ def run_receding_horizon_testing(psn_model_path: str = None,
             filepath = save_test_results(results, output_dir)
             print(f"  ✓ Results saved to: {filepath}")
             
-            # Create trajectory visualization GIF  
-            gif_path = create_receding_horizon_gif(sample_data, results, sample_data['sample_id'], output_dir, results.get('normalized_sample_data'))
-            if gif_path:
-                print(f"  ✓ GIF visualization created: {gif_path}")
             
             all_results.append(results)
             
@@ -1430,6 +1284,49 @@ def run_receding_horizon_testing(psn_model_path: str = None,
 
 
 # ============================================================================
+# HELPER FUNCTIONS FOR TEST CONFIGURATION
+# ============================================================================
+
+def print_test_options():
+    """Print available test options and their descriptions."""
+    print("=" * 80)
+    print("AVAILABLE TEST OPTIONS")
+    print("=" * 80)
+    print("1. PREDICTION TEST (All agents' goals are not known)")
+    print("   1a. prediction_test + true_goals: Use true goals for all agents")
+    print("   1b. prediction_test + goal_inference: Use inferred goals for all agents")
+    print("   - Computes: ADE, FDE, Navigation Cost, Safety Cost, Control Cost")
+    print("   - Tests: Goal inference + Player selection")
+    print()
+    print("2. PLANNING TEST (Ego agent's goal is always known)")
+    print("   2a. planning_test + true_goals: Use true goals for all agents")
+    print("   2b. planning_test + goal_inference: Use inferred goals for all agents")
+    print("   - Computes: Navigation Cost, Safety Cost, Control Cost")
+    print("   - Tests: Player selection only")
+    print()
+    print("To change test configuration, edit config.yaml:")
+    print("  test_type: 'prediction_test' or 'planning_test'")
+    print("  goal_source: 'true_goals' or 'goal_inference'")
+    print("=" * 80)
+
+
+def validate_test_configuration(test_type: str, goal_source: str) -> bool:
+    """Validate test configuration parameters."""
+    valid_test_types = ["prediction_test", "planning_test"]
+    valid_goal_sources = ["true_goals", "goal_inference"]
+    
+    if test_type not in valid_test_types:
+        print(f"Error: Invalid test_type '{test_type}'. Must be one of: {valid_test_types}")
+        return False
+    
+    if goal_source not in valid_goal_sources:
+        print(f"Error: Invalid goal_source '{goal_source}'. Must be one of: {valid_goal_sources}")
+        return False
+    
+    return True
+
+
+# ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 
@@ -1441,7 +1338,19 @@ if __name__ == "__main__":
     # Load configuration
     use_baseline = config.testing.receding_horizon.use_baseline
     baseline_mode = config.testing.receding_horizon.baseline_mode
+    test_type = config.testing.receding_horizon.test_type
     goal_source = config.testing.receding_horizon.goal_source
+    
+    # Validate configuration
+    if not validate_test_configuration(test_type, goal_source):
+        print_test_options()
+        exit(1)
+    
+    # Print current test configuration
+    print(f"Current Test Configuration:")
+    print(f"  Test Type: {test_type}")
+    print(f"  Goal Source: {goal_source}")
+    print()
     
     # Initialize model paths
     psn_model_path = None
@@ -1460,7 +1369,9 @@ if __name__ == "__main__":
     if not use_baseline:
         # Model paths - PSN from goal_true directory
         # PSN was trained with true goals, so load from goal_true_xxx directory
-        psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/psn_gru_true_goals_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
+        # Include observation input type (full/partial) in the model path
+        obs_input_type = config.psn.obs_input_type
+        psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/psn_gru_{obs_input_type}_true_goals_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
         
         # Check if PSN model exists
         if not os.path.exists(psn_model_path):
@@ -1476,11 +1387,6 @@ if __name__ == "__main__":
         # For baseline methods, create hierarchical directory structure
         method_name = baseline_mode.lower().replace(' ', '_').replace('_', '')
         
-        # Determine if this is prediction or planning test based on metrics computed
-        test_type = "planning"  # Default to planning since we always compute planning metrics
-        if config.testing.receding_horizon.compute_prediction_metrics and not config.testing.receding_horizon.compute_planning_metrics:
-            test_type = "prediction"
-        
         # Create directory structure: baseline_results/test_type/N_agents/method_param_goal_source
         n_agents = config.game.N_agents
         baseline_param = config.testing.receding_horizon.baseline_parameter
@@ -1493,18 +1399,30 @@ if __name__ == "__main__":
         # Extract method name from PSN model path
         psn_model_name = os.path.basename(psn_model_path).replace('.pkl', '')
         
+        # Extract full/partial designation from config (since psn_model_path might not be in scope)
+        obs_type = config.psn.obs_input_type  # This is "full" or "partial"
+        
+        # Include selection method in directory name for PSN methods
+        selection_method = config.testing.receding_horizon.selection_method
+        if selection_method == "threshold":
+            method_suffix = f"threshold_{config.testing.receding_horizon.mask_threshold}"
+        else:  # rank
+            method_suffix = f"rank_{config.testing.receding_horizon.rank}"
+        
         if goal_source == "true_goals":
-            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_goal_true_{psn_model_name}")
+            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_{test_type}_goal_true_{obs_type}_{method_suffix}_{psn_model_name}")
         elif goal_source == "goal_inference":
             # Always use first_steps for goal inference
-            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_goal_inference_{psn_model_name}")
+            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_{test_type}_goal_inference_{obs_type}_{method_suffix}_{psn_model_name}")
         else:
             # Fallback to original directory name with method name
-            output_dir = os.path.join(psn_model_dir, f"{config.testing.receding_horizon.output_dir}_{psn_model_name}")
+            output_dir = os.path.join(psn_model_dir, f"{config.testing.receding_horizon.output_dir}_{test_type}_{obs_type}_{method_suffix}_{psn_model_name}")
     
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Configuration:")
+    print(f"  Test Type: {test_type}")
+    print(f"  Goal Source: {goal_source}")
     print(f"  Use Baseline: {use_baseline}")
     if use_baseline:
         print(f"  Baseline Mode: {baseline_mode}")
@@ -1512,8 +1430,12 @@ if __name__ == "__main__":
     else:
         print(f"  PSN Model: {psn_model_path}")
         print(f"  Goal Model: {goal_model_path}")
+        print(f"  Selection Method: {config.testing.receding_horizon.selection_method}")
+        if config.testing.receding_horizon.selection_method == "threshold":
+            print(f"  Mask Threshold: {config.testing.receding_horizon.mask_threshold}")
+        else:  # rank
+            print(f"  Rank: {config.testing.receding_horizon.rank} (select {config.testing.receding_horizon.rank - 1} other agents)")
     print(f"  Reference Data: {reference_file}")
-    print(f"  Goal Source: {goal_source}")
     print(f"  Number of Samples: {config.testing.receding_horizon.num_samples}")
     print(f"  Use Later Samples: {config.testing.receding_horizon.use_later_samples}")
     print(f"  Results will be saved to: {output_dir}")
@@ -1526,7 +1448,9 @@ if __name__ == "__main__":
         output_dir=output_dir,
         num_samples=config.testing.receding_horizon.num_samples,
         use_baseline=use_baseline,
-        baseline_mode=baseline_mode
+        baseline_mode=baseline_mode,
+        test_type=test_type,
+        goal_source=goal_source
     )
     
     # Create summary file explaining the model relationships
@@ -1534,17 +1458,17 @@ if __name__ == "__main__":
     with open(summary_path, 'w') as f:
         f.write("Receding Horizon Testing with Integrated Models\n")
         f.write("=" * 60 + "\n\n")
-        f.write("Model Configuration:\n")
+        f.write("Test Configuration:\n")
+        f.write(f"  - Test Type: {test_type}\n")
+        f.write(f"  - Goal Source: {goal_source}\n")
+        f.write(f"  - Use Baseline: {use_baseline}\n")
         if use_baseline:
             f.write(f"  - Baseline Mode: {baseline_mode}\n")
             f.write(f"  - Baseline Parameter: {config.testing.receding_horizon.baseline_parameter}\n")
         else:
             f.write(f"  - Goal Inference Model: {goal_model_path}\n")
             f.write(f"  - PSN Model: {psn_model_path}\n")
-        f.write(f"  - Reference Data: {reference_file}\n\n")
-        f.write("Test Configuration:\n")
-        f.write(f"  - Use Baseline: {use_baseline}\n")
-        f.write(f"  - Goal source: {config.testing.receding_horizon.goal_source}\n")
+        f.write(f"  - Reference Data: {reference_file}\n")
         f.write(f"  - Number of samples: {config.testing.receding_horizon.num_samples}\n")
         f.write(f"  - Use later samples: {config.testing.receding_horizon.use_later_samples}\n")
         f.write(f"  - Receding horizon iterations: {T_receding_horizon_iterations}\n")
@@ -1594,7 +1518,10 @@ if __name__ == "__main__":
         
         f.write("\nDirectory Structure:\n")
         if not use_baseline:
-            f.write(f"  Goal Inference: {os.path.dirname(goal_model_path)}\n")
+            if goal_model_path is not None:
+                f.write(f"  Goal Inference: {os.path.dirname(goal_model_path)}\n")
+            else:
+                f.write(f"  Goal Inference: None (using true goals)\n")
             f.write(f"  PSN Training: {os.path.dirname(psn_model_path)}\n")
             f.write(f"  Receding Horizon Test: {output_dir}\n")
         else:
