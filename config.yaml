@@ -263,7 +263,7 @@ testing:
     rank: 3                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
     
     # Testing configuration
-    num_samples: 64                     # Number of samples to test (use later 128 samples)
+    num_samples: 1                     # Number of samples to test (use later 128 samples)
     use_later_samples: true              # Whether to use later samples (samples 384-511) instead of first samples
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     

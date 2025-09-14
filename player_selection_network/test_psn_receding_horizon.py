@@ -281,6 +281,46 @@ def compute_planning_metrics(ego_trajectory: jnp.ndarray,
     }
 
 
+def compute_consistency_metric(masks: List[jnp.ndarray], T_observation: int) -> float:
+    """
+    Compute consistency metric for selected agents over time.
+    
+    The consistency metric measures how much the selected agents change over time:
+    consistency = 1 - 1/(T-T_obs) * sum |m_t - m_{t-1}|_1 / (N-1)
+    
+    Args:
+        masks: List of mask vectors for each time step (T, N-1)
+        T_observation: Number of observation steps (excluded from computation)
+    
+    Returns:
+        Consistency metric value (0 = no consistency, 1 = perfect consistency)
+    """
+    if len(masks) <= T_observation + 1:
+        return 0.0  # Not enough data to compute consistency
+    
+    # Only consider masks after observation period
+    planning_masks = masks[T_observation:]
+    T_planning = len(planning_masks)
+    N_agents = planning_masks[0].shape[0] + 1  # +1 for ego agent
+    
+    if T_planning <= 1:
+        return 1.0  # Perfect consistency if only one time step
+    
+    # Compute L1 norm differences between consecutive masks
+    mask_diffs = []
+    for t in range(1, T_planning):
+        diff = jnp.abs(planning_masks[t] - planning_masks[t-1])
+        mask_diffs.append(jnp.sum(diff))
+    
+    # Average L1 norm difference, normalized by (N-1)
+    avg_diff = jnp.mean(jnp.array(mask_diffs)) / (N_agents - 1)
+    
+    # Consistency metric: 1 - normalized average difference
+    consistency = 1.0 - avg_diff
+    
+    return float(consistency)
+
+
 def compute_trajectory_metrics(ego_trajectory: jnp.ndarray,
                              ground_truth_trajectory: jnp.ndarray,
                              other_trajectories: List[jnp.ndarray],
@@ -1033,6 +1073,18 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         results['prediction_metrics'] = {k: v for k, v in trajectory_metrics.items() if k in ['ade', 'fde']}
         results['planning_metrics'] = {k: v for k, v in trajectory_metrics.items() if k in ['navigation_cost', 'safety_cost', 'control_cost', 'trajectory_length', 'trajectory_smoothness']}
         
+        # Compute consistency metric from masks
+        masks = []
+        for iter_result in results['receding_horizon_results']:
+            if 'predicted_mask' in iter_result and iter_result['predicted_mask'] is not None:
+                masks.append(jnp.array(iter_result['predicted_mask']))
+        
+        if len(masks) > 0:
+            consistency = compute_consistency_metric(masks, T_observation)
+            results['consistency_metric'] = consistency
+        else:
+            results['consistency_metric'] = 0.0
+        
         # Compute summary statistics
         goal_rmse_values = []
         mask_sparsity_values = []
@@ -1062,6 +1114,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         results['mean_computation_time'] = 0.0
         results['prediction_metrics'] = {'ade': float('inf'), 'fde': float('inf')}
         results['planning_metrics'] = {'navigation_cost': float('inf'), 'safety_cost': float('inf'), 'control_cost': float('inf'), 'trajectory_length': float('inf'), 'trajectory_smoothness': float('inf')}
+        results['consistency_metric'] = 0.0
     
     # End timing the entire receding horizon planning phase
     sample_end_time = time.time()
@@ -1071,6 +1124,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     print(f"    ✓ Goal RMSE: {results['goal_rmse']:.4f}")
     print(f"    ✓ Mask Sparsity: {results['mask_sparsity']:.2f}")
     print(f"    ✓ Selected Agents: {results['num_selected_agents']:.1f}")
+    print(f"    ✓ Consistency Metric: {results['consistency_metric']:.4f}")
     print(f"    ✓ Mean Computation Time per Receding Horizon Step: {results['mean_computation_time']:.4f}s")
     print(f"    ✓ Total Computation Time per Sample: {results['sample_computation_time']:.4f}s")
     
@@ -1278,12 +1332,14 @@ def run_receding_horizon_testing(psn_model_path: str = None,
         goal_rmse_values = [r['goal_rmse'] for r in all_results if r['goal_rmse'] != float('inf')]
         mask_sparsity_values = [r['mask_sparsity'] for r in all_results]
         num_selected_values = [r['num_selected_agents'] for r in all_results]
+        consistency_values = [r['consistency_metric'] for r in all_results]
         computation_times = [r['mean_computation_time'] for r in all_results if r['mean_computation_time'] > 0]
         
         if goal_rmse_values:
             print(f"Goal Prediction RMSE: {np.mean(goal_rmse_values):.4f} ± {np.std(goal_rmse_values):.4f}")
         print(f"Mask Sparsity: {np.mean(mask_sparsity_values):.3f} ± {np.std(mask_sparsity_values):.3f}")
         print(f"Average Selected Agents: {np.mean(num_selected_values):.2f} ± {np.std(num_selected_values):.2f}")
+        print(f"Consistency Metric: {np.mean(consistency_values):.4f} ± {np.std(consistency_values):.4f}")
         if computation_times:
             print(f"Mean Computation Time per Receding Horizon Step: {np.mean(computation_times):.4f}s ± {np.std(computation_times):.4f}s")
         
@@ -1554,6 +1610,11 @@ if __name__ == "__main__":
                     f.write(f"  - Trajectory Length (steps {T_observation}-{T_total}): {np.mean(trajectory_length_values):.4f} ± {np.std(trajectory_length_values):.4f}\n")
                 if trajectory_smoothness_values:
                     f.write(f"  - Trajectory Smoothness (steps {T_observation}-{T_total}): {np.mean(trajectory_smoothness_values):.4f} ± {np.std(trajectory_smoothness_values):.4f}\n")
+            
+            # Consistency metric
+            consistency_values = [r['consistency_metric'] for r in results if r['consistency_metric'] is not None]
+            if consistency_values:
+                f.write(f"  - Consistency Metric: {np.mean(consistency_values):.4f} ± {np.std(consistency_values):.4f}\n")
             
             # Computation time
             computation_times = [r['mean_computation_time'] for r in results if r['mean_computation_time'] > 0]
