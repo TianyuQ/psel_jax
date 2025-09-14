@@ -34,7 +34,7 @@ game:
   T_observation: 10         # Number of steps to observe before solving the game
 
   # Agent configuration
-  N_agents: 10               # Total number of agents in the game
+  N_agents: 4               # Total number of agents in the game
   ego_agent_id: 0           # ID of the ego agent (usually 0)
   
   # State and control dimensions
@@ -63,7 +63,7 @@ optimization:
 # ============================================================================
 reference_generation:
   # Data generation parameters
-  num_samples: 40           # Number of reference trajectory samples to generate
+  num_samples: 64           # Number of reference trajectory samples to generate
   save_dir: "reference_trajectories_${N_agents}p"  # Directory to save reference trajectories
   
   # Data split configuration
@@ -139,8 +139,8 @@ psn:
   num_epochs: 100            # Number of training epochs
   
   # Loss function weights
-  sigma1: 0.075              # Weight for mask sparsity loss
-  sigma2: 0.075               # Weight for mask diversity loss
+  sigma1: 0.5              # Weight for mask sparsity loss
+  sigma2: 0.5               # Weight for mask diversity loss
   
   # Goal source configuration
   # IMPORTANT: This setting affects testing behavior:
@@ -263,14 +263,14 @@ testing:
     rank: 3                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
     
     # Testing configuration
-    num_samples: 10                     # Number of samples to test (use later 128 samples)
+    num_samples: 64                     # Number of samples to test (use later 128 samples)
     use_later_samples: true              # Whether to use later samples (samples 384-511) instead of first samples
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Baseline testing configuration
     use_baseline: true                  # Whether to use baseline methods instead of PSN model
     baseline_mode: "Nearest Neighbor"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
-    baseline_parameter: 4                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
+    baseline_parameter: 2                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
     
     # Evaluation metrics configuration - automatically set based on test_type
     # prediction_test: compute_prediction_metrics=true, compute_planning_metrics=true

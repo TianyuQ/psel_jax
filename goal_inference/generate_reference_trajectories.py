@@ -482,7 +482,7 @@ def generate_reference_trajectories(num_samples: int, save_dir: str = "reference
     print(f"Saving to directory: {save_path}")
     print("=" * 60)
     
-    for sample_id in range(num_samples):
+    for sample_id in range(40, num_samples):
         if sample_id % 10 == 0 or sample_id < 5:  # Report every 10 samples + first 5
             print(f"Generating sample {sample_id + 1}/{num_samples}...")
         start_time = time.time()

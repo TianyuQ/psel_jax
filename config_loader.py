@@ -41,15 +41,14 @@ class ConfigLoader:
         return getattr(self._config, name)
     
     def get(self, key: str, default: Any = None) -> Any:
-        """Get configuration value with optional default."""
-        try:
-            keys = key.split('.')
-            value = self._config
-            for k in keys:
-                value = getattr(value, k)
-            return value
-        except AttributeError:
-            return default
+        """Get configuration value with optional default."""  
+        keys = key.split('.')
+        value = self._config
+        for k in keys:
+            if not hasattr(value, k):
+                return default
+            value = getattr(value, k)
+        return value
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert back to dictionary."""
@@ -90,17 +89,13 @@ def load_config(config_path: Optional[str] = None) -> ConfigLoader:
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
     
-    try:
-        with open(config_path, 'r') as f:
+    with open(config_path, 'r') as f:
             config_dict = yaml.safe_load(f)
         
-        # Process variable substitutions
-        config_dict = _process_variable_substitutions(config_dict)
-        
-        return ConfigLoader(config_dict)
+    # Process variable substitutions
+    config_dict = _process_variable_substitutions(config_dict)
     
-    except yaml.YAMLError as e:
-        raise yaml.YAMLError(f"Error parsing configuration file {config_path}: {e}")
+    return ConfigLoader(config_dict)
 
 
 def _process_variable_substitutions(config_dict: dict) -> dict:
@@ -295,20 +290,16 @@ def get_data_paths(config: Optional[ConfigLoader] = None) -> Dict[str, Path]:
 
 if __name__ == "__main__":
     # Test the configuration loader
-    try:
-        config = load_config()
-        print("Configuration loaded successfully!")
-        print(f"Game parameters: N_agents={config.game.N_agents}, dt={config.game.dt}")
-        print(f"PSN learning rate: {config.psn.learning_rate}")
-        print(f"Goal inference epochs: {config.goal_inference.num_epochs}")
-        
-        # Test device configuration
-        device = get_device_config()
-        print(f"Selected device: {device}")
-        
-        # Test path creation
-        paths = get_data_paths(config)
-        print(f"Data paths: {paths}")
-        
-    except Exception as e:
-        print(f"Error testing configuration: {e}")
+    config = load_config()
+    print("Configuration loaded successfully!")
+    print(f"Game parameters: N_agents={config.game.N_agents}, dt={config.game.dt}")
+    print(f"PSN learning rate: {config.psn.learning_rate}")
+    print(f"Goal inference epochs: {config.goal_inference.num_epochs}")
+    
+    # Test device configuration
+    device = get_device_config()
+    print(f"Selected device: {device}")
+    
+    # Test path creation
+    paths = get_data_paths(config)
+    print(f"Data paths: {paths}")

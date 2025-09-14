@@ -190,7 +190,7 @@ def compute_planning_metrics(ego_trajectory: jnp.ndarray,
                            ego_goals: jnp.ndarray,
                            dt: float) -> Dict[str, float]:
     """
-    Compute planning metrics: navigation cost, safety cost, and control cost.
+    Compute planning metrics: navigation cost, safety cost, control cost, trajectory length, and trajectory smoothness.
     
     Args:
         ego_trajectory: Ego agent trajectory (T, 4) - [x, y, vx, vy]
@@ -200,7 +200,8 @@ def compute_planning_metrics(ego_trajectory: jnp.ndarray,
         dt: Time step size
     
     Returns:
-        Dictionary with navigation_cost, safety_cost, control_cost
+        Dictionary with navigation_cost, safety_cost, control_cost, trajectory_length, trajectory_smoothness
+        - trajectory_smoothness: Mean of orientation changes between consecutive trajectory segments (radians)
     """
     T = len(ego_trajectory)
     
@@ -228,10 +229,55 @@ def compute_planning_metrics(ego_trajectory: jnp.ndarray,
     control_magnitudes = jnp.linalg.norm(ego_controls, axis=1)
     control_cost = ctrl_weight * jnp.sum(control_magnitudes) * dt
     
+    # Trajectory length: total distance traveled along the trajectory
+    if T > 1:
+        # Compute distances between consecutive positions
+        position_diffs = ego_positions[1:] - ego_positions[:-1]  # (T-1, 2)
+        segment_lengths = jnp.linalg.norm(position_diffs, axis=1)  # (T-1,)
+        trajectory_length = jnp.sum(segment_lengths)
+    else:
+        trajectory_length = 0.0
+    
+    # Trajectory smoothness: measure of trajectory orientation changes (lower = smoother)
+    if T > 2:
+        # Compute trajectory direction vectors between consecutive positions
+        direction_vectors = ego_positions[1:] - ego_positions[:-1]  # (T-1, 2)
+        
+        # Compute angles between consecutive direction vectors
+        angles = []
+        for i in range(len(direction_vectors) - 1):
+            # Current and next direction vectors
+            v1 = direction_vectors[i]
+            v2 = direction_vectors[i + 1]
+            
+            # Compute angle between vectors using dot product
+            # cos(θ) = (v1 · v2) / (||v1|| * ||v2||)
+            v1_norm = jnp.linalg.norm(v1)
+            v2_norm = jnp.linalg.norm(v2)
+            
+            if v1_norm > 1e-8 and v2_norm > 1e-8:  # Avoid division by zero
+                cos_angle = jnp.dot(v1, v2) / (v1_norm * v2_norm)
+                # Clamp to avoid numerical issues with arccos
+                cos_angle = jnp.clip(cos_angle, -1.0, 1.0)
+                angle = jnp.arccos(cos_angle)  # Angle in radians
+                angles.append(angle)
+            else:
+                angles.append(0.0)  # If either vector is zero, assume no change
+        
+        if angles:
+            # Smoothness is the mean of orientation changes (lower = smoother)
+            trajectory_smoothness = jnp.mean(jnp.array(angles))
+        else:
+            trajectory_smoothness = 0.0
+    else:
+        trajectory_smoothness = 0.0
+    
     return {
         'navigation_cost': float(navigation_cost),
         'safety_cost': float(safety_cost),
-        'control_cost': float(control_cost)
+        'control_cost': float(control_cost),
+        'trajectory_length': float(trajectory_length),
+        'trajectory_smoothness': float(trajectory_smoothness)
     }
 
 
@@ -985,7 +1031,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         
         # Store metrics
         results['prediction_metrics'] = {k: v for k, v in trajectory_metrics.items() if k in ['ade', 'fde']}
-        results['planning_metrics'] = {k: v for k, v in trajectory_metrics.items() if k in ['navigation_cost', 'safety_cost', 'control_cost']}
+        results['planning_metrics'] = {k: v for k, v in trajectory_metrics.items() if k in ['navigation_cost', 'safety_cost', 'control_cost', 'trajectory_length', 'trajectory_smoothness']}
         
         # Compute summary statistics
         goal_rmse_values = []
@@ -1015,7 +1061,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         results['num_selected_agents'] = 0.0
         results['mean_computation_time'] = 0.0
         results['prediction_metrics'] = {'ade': float('inf'), 'fde': float('inf')}
-        results['planning_metrics'] = {'navigation_cost': float('inf'), 'safety_cost': float('inf'), 'control_cost': float('inf')}
+        results['planning_metrics'] = {'navigation_cost': float('inf'), 'safety_cost': float('inf'), 'control_cost': float('inf'), 'trajectory_length': float('inf'), 'trajectory_smoothness': float('inf')}
     
     # End timing the entire receding horizon planning phase
     sample_end_time = time.time()
@@ -1031,15 +1077,17 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     # Print prediction metrics (steps 10-50 only)
     if results['prediction_metrics']:
         print(f"    ✓ Prediction Metrics (steps {T_observation}-{T_total}):")
-        print(f"        ADE: {results['prediction_metrics'].get('ade', 'N/A'):.4f}")
-        print(f"        FDE: {results['prediction_metrics'].get('fde', 'N/A'):.4f}")
+        print(f"        ADE: {results['prediction_metrics'].get('ade', float('inf')):.4f}")
+        print(f"        FDE: {results['prediction_metrics'].get('fde', float('inf')):.4f}")
     
     # Print planning metrics (steps 10-50 only)
     if results['planning_metrics']:
         print(f"    ✓ Planning Metrics (steps {T_observation}-{T_total}):")
-        print(f"        Navigation Cost: {results['planning_metrics'].get('navigation_cost', 'N/A'):.4f}")
-        print(f"        Safety Cost: {results['planning_metrics'].get('safety_cost', 'N/A'):.4f}")
-        print(f"        Control Cost: {results['planning_metrics'].get('control_cost', 'N/A'):.4f}")
+        print(f"        Navigation Cost: {results['planning_metrics'].get('navigation_cost', float('inf')):.4f}")
+        print(f"        Safety Cost: {results['planning_metrics'].get('safety_cost', float('inf')):.4f}")
+        print(f"        Control Cost: {results['planning_metrics'].get('control_cost', float('inf')):.4f}")
+        print(f"        Trajectory Length: {results['planning_metrics'].get('trajectory_length', float('inf')):.4f}")
+        print(f"        Trajectory Smoothness: {results['planning_metrics'].get('trajectory_smoothness', float('inf')):.4f}")
     
     # Store normalized data for GIF creation
     results['normalized_sample_data'] = normalized_sample_data
@@ -1186,24 +1234,19 @@ def run_receding_horizon_testing(psn_model_path: str = None,
     # Load samples
     reference_data = []
     for json_file in json_files:
-        try:
-            with open(json_file, 'r') as f:
-                sample_data = json.load(f)
-                reference_data.append(sample_data)
-        except Exception as e:
-            print(f"Warning: Failed to load {json_file}: {e}")
-            continue
+        with open(json_file, 'r') as f:
+            sample_data = json.load(f)
+            reference_data.append(sample_data)
     
     print(f"Loaded {len(reference_data)} reference samples")
     
     # Select samples based on configuration
     if config.testing.receding_horizon.use_later_samples:
-        # Use later 128 samples (samples 384-511)
-        train_samples = config.training.train_samples  # 384
-        start_idx = train_samples  # Start from sample 384
-        end_idx = start_idx + num_samples  # End at sample 384 + 128 = 512
-        test_samples = reference_data[start_idx:end_idx]
-        print(f"Using later samples {start_idx}-{end_idx-1} ({len(test_samples)} samples)")
+        # Use specific test samples (samples 512-575)
+        test_start_id = 512
+        test_end_id = test_start_id + num_samples  # 512 + 64 = 576
+        test_samples = reference_data[test_start_id:test_end_id]
+        print(f"Using test samples {test_start_id}-{test_end_id-1} ({len(test_samples)} samples)")
     else:
         # Use first N samples (original behavior)
         test_samples = reference_data[:min(num_samples, len(reference_data))]
@@ -1214,22 +1257,16 @@ def run_receding_horizon_testing(psn_model_path: str = None,
     for i, sample_data in enumerate(test_samples):
         print(f"\nTesting sample {i+1}/{len(test_samples)}...")
         
-        try:
-            # Run receding horizon testing with models
-            results = test_receding_horizon_with_models(
+        results = test_receding_horizon_with_models(
                 sample_data, psn_model, psn_trained_state, goal_model, goal_trained_state, 
                 psn_model_path, use_baseline, baseline_mode)
             
-            # Save results
-            filepath = save_test_results(results, output_dir)
-            print(f"  ✓ Results saved to: {filepath}")
-            
-            
-            all_results.append(results)
-            
-        except Exception as e:
-            print(f"  ✗ Error testing sample {i}: {str(e)}")
-            continue
+        # Save results
+        filepath = save_test_results(results, output_dir)
+        print(f"  ✓ Results saved to: {filepath}")
+        
+        
+        all_results.append(results)
     
     # Print summary
     print(f"\n" + "=" * 80)
@@ -1270,6 +1307,8 @@ def run_receding_horizon_testing(psn_model_path: str = None,
             nav_cost_values = [r['planning_metrics'].get('navigation_cost', float('inf')) for r in all_results if r['planning_metrics'].get('navigation_cost', float('inf')) != float('inf')]
             safety_cost_values = [r['planning_metrics'].get('safety_cost', float('inf')) for r in all_results if r['planning_metrics'].get('safety_cost', float('inf')) != float('inf')]
             control_cost_values = [r['planning_metrics'].get('control_cost', float('inf')) for r in all_results if r['planning_metrics'].get('control_cost', float('inf')) != float('inf')]
+            trajectory_length_values = [r['planning_metrics'].get('trajectory_length', float('inf')) for r in all_results if r['planning_metrics'].get('trajectory_length', float('inf')) != float('inf')]
+            trajectory_smoothness_values = [r['planning_metrics'].get('trajectory_smoothness', float('inf')) for r in all_results if r['planning_metrics'].get('trajectory_smoothness', float('inf')) != float('inf')]
             
             if nav_cost_values:
                 print(f"Navigation Cost (steps {T_observation}-{T_total}): {np.mean(nav_cost_values):.4f} ± {np.std(nav_cost_values):.4f}")
@@ -1277,6 +1316,10 @@ def run_receding_horizon_testing(psn_model_path: str = None,
                 print(f"Safety Cost (steps {T_observation}-{T_total}): {np.mean(safety_cost_values):.4f} ± {np.std(safety_cost_values):.4f}")
             if control_cost_values:
                 print(f"Control Cost (steps {T_observation}-{T_total}): {np.mean(control_cost_values):.4f} ± {np.std(control_cost_values):.4f}")
+            if trajectory_length_values:
+                print(f"Trajectory Length (steps {T_observation}-{T_total}): {np.mean(trajectory_length_values):.4f} ± {np.std(trajectory_length_values):.4f}")
+            if trajectory_smoothness_values:
+                print(f"Trajectory Smoothness (steps {T_observation}-{T_total}): {np.mean(trajectory_smoothness_values):.4f} ± {np.std(trajectory_smoothness_values):.4f}")
     
     print(f"Results saved to: {output_dir}")
     
@@ -1295,13 +1338,13 @@ def print_test_options():
     print("1. PREDICTION TEST (All agents' goals are not known)")
     print("   1a. prediction_test + true_goals: Use true goals for all agents")
     print("   1b. prediction_test + goal_inference: Use inferred goals for all agents")
-    print("   - Computes: ADE, FDE, Navigation Cost, Safety Cost, Control Cost")
+    print("   - Computes: ADE, FDE, Navigation Cost, Safety Cost, Control Cost, Trajectory Length, Trajectory Smoothness")
     print("   - Tests: Goal inference + Player selection")
     print()
     print("2. PLANNING TEST (Ego agent's goal is always known)")
     print("   2a. planning_test + true_goals: Use true goals for all agents")
     print("   2b. planning_test + goal_inference: Use inferred goals for all agents")
-    print("   - Computes: Navigation Cost, Safety Cost, Control Cost")
+    print("   - Computes: Navigation Cost, Safety Cost, Control Cost, Trajectory Length, Trajectory Smoothness")
     print("   - Tests: Player selection only")
     print()
     print("To change test configuration, edit config.yaml:")
@@ -1499,12 +1542,18 @@ if __name__ == "__main__":
                 nav_cost_values = [r['planning_metrics'].get('navigation_cost', float('inf')) for r in results if r['planning_metrics'].get('navigation_cost', float('inf')) != float('inf')]
                 safety_cost_values = [r['planning_metrics'].get('safety_cost', float('inf')) for r in results if r['planning_metrics'].get('safety_cost', float('inf')) != float('inf')]
                 control_cost_values = [r['planning_metrics'].get('control_cost', float('inf')) for r in results if r['planning_metrics'].get('control_cost', float('inf')) != float('inf')]
+                trajectory_length_values = [r['planning_metrics'].get('trajectory_length', float('inf')) for r in results if r['planning_metrics'].get('trajectory_length', float('inf')) != float('inf')]
+                trajectory_smoothness_values = [r['planning_metrics'].get('trajectory_smoothness', float('inf')) for r in results if r['planning_metrics'].get('trajectory_smoothness', float('inf')) != float('inf')]
                 if nav_cost_values:
                     f.write(f"  - Navigation Cost (steps {T_observation}-{T_total}): {np.mean(nav_cost_values):.4f} ± {np.std(nav_cost_values):.4f}\n")
                 if safety_cost_values:
                     f.write(f"  - Safety Cost (steps {T_observation}-{T_total}): {np.mean(safety_cost_values):.4f} ± {np.std(safety_cost_values):.4f}\n")
                 if control_cost_values:
                     f.write(f"  - Control Cost (steps {T_observation}-{T_total}): {np.mean(control_cost_values):.4f} ± {np.std(control_cost_values):.4f}\n")
+                if trajectory_length_values:
+                    f.write(f"  - Trajectory Length (steps {T_observation}-{T_total}): {np.mean(trajectory_length_values):.4f} ± {np.std(trajectory_length_values):.4f}\n")
+                if trajectory_smoothness_values:
+                    f.write(f"  - Trajectory Smoothness (steps {T_observation}-{T_total}): {np.mean(trajectory_smoothness_values):.4f} ± {np.std(trajectory_smoothness_values):.4f}\n")
             
             # Computation time
             computation_times = [r['mean_computation_time'] for r in results if r['mean_computation_time'] > 0]
