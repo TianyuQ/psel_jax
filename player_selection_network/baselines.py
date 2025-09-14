@@ -94,9 +94,16 @@ def baseline_selection(
 
                     D = delta_px + delta_py + delta_vx + delta_vy
                     if D > 1e-10:  # Avoid division by zero
-                        J1 = (1 / (D**2)) * 2 * delta_vx * delta_t
-                        J2 = (1 / (D**2)) * 2 * delta_vy * delta_t
+
+                        future_vel_diff_x = state_diff[2] + delta_t * control[player_id][0]
+                        future_vel_diff_y = state_diff[3] + delta_t * control[player_id][1]
+                        
+                        # New Jacobian for cost = exp(-D) where D is the squared norm
+                        exp_term = np.exp(-D)
+                        J1 = 2 * delta_t * future_vel_diff_x * exp_term
+                        J2 = 2 * delta_t * future_vel_diff_y * exp_term
                         norm_costs[i] = np.linalg.norm([J1, J2])
+
                     else:
                         norm_costs[i] = 0.0
                 
@@ -133,11 +140,21 @@ def baseline_selection(
 
                     D = delta_px + delta_py + delta_vx + delta_vy
                     if D > 1e-10:  # Avoid division by zero
-                        H11 = 2 * delta_t**2 / D**3 * (4*delta_vx**2 - D)
-                        H12 = 8 * delta_t**2 / D**3 * delta_vx * delta_vy
-                        H22 = 2 * delta_t**2 / D**3 * (4*delta_vy**2 - D)
+
+                        future_vel_diff_x = state_diff[2] + delta_t * control[player_id][0]
+                        future_vel_diff_y = state_diff[3] + delta_t * control[player_id][1]
+
+                        # New Hessian for cost = exp(-D) where D is the squared norm
+                        exp_term = np.exp(-D)
+                        common_factor = 2 * delta_t**2 * exp_term
+
+                        H11 = common_factor * (2 * future_vel_diff_x**2 - 1)
+                        H22 = common_factor * (2 * future_vel_diff_y**2 - 1)
+                        H12 = 2 * common_factor * future_vel_diff_x * future_vel_diff_y
+                        
                         hessian_matrix = np.array([[H11, H12], [H12, H22]])
                         norm_costs[i] = np.linalg.norm(hessian_matrix) # Frobenius norm
+
                     else:
                         norm_costs[i] = 0.0
                 
@@ -150,7 +167,7 @@ def baseline_selection(
         if sim_step == 1:
             mask = baseline_selection(input_traj, trajectory, control, "Nearest Neighbor", sim_step, mode_parameter)
         else:
-            # Ensure we have enough trajectory data (need at least 8 steps for previous state)
+            # Ensure we have enough trajectory data (need at least 2 previous states)
             if len(trajectory[0]) < 8:
                 # If trajectory is too short, use all agents
                 mask = np.ones(N - 1)
@@ -172,7 +189,7 @@ def baseline_selection(
                     D_prev = np.sum(state_diff_prev**2)
                     
                     if D > 1e-10 and D_prev > 1e-10:  # Avoid division by zero
-                        cost_evolution_values[i] = (mu / D) - (mu / D_prev)
+                        cost_evolution_values[i] = mu*np.exp(-D) - mu*np.exp(-D_prev)
                     else:
                         cost_evolution_values[i] = 0.0
                 
