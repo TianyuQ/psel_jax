@@ -139,8 +139,8 @@ psn:
   num_epochs: 100            # Number of training epochs
   
   # Loss function weights
-  sigma1: 0.5              # Weight for mask sparsity loss
-  sigma2: 0.5               # Weight for mask diversity loss
+  sigma1: 0.075              # Weight for mask sparsity loss
+  sigma2: 0.075               # Weight for mask diversity loss
   
   # Goal source configuration
   # IMPORTANT: This setting affects testing behavior:
@@ -248,7 +248,7 @@ testing:
     # 1b. prediction_test + goal_inference: Use inferred goals for all agents  
     # 2a. planning_test + true_goals: Use true goals for all agents
     # 2b. planning_test + goal_inference: Use inferred goals for all agents
-    goal_source: "true_goals"            # ["true_goals", "goal_inference"]
+    goal_source: "goal_inference"            # ["true_goals", "goal_inference"]
     
     # Two-phase approach configuration
     initial_stabilization_iterations: 0  # No stabilization period - use PSN and goal inference from step 10
@@ -258,18 +258,18 @@ testing:
     # - "threshold": Select agents with mask values > mask_threshold (default behavior)
     # - "rank": Select top N agents based on mask values (rank = N means select N-1 other agents)
     # Note: Baseline methods use their own internal selection logic and ignore these parameters
-    selection_method: "threshold"        # ["threshold", "rank"] - only for PSN methods
+    selection_method: "rank"        # ["threshold", "rank"] - only for PSN methods
     mask_threshold: 0.5                  # Threshold for agent selection when using "threshold" method
-    rank: 3                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
+    rank: 2                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
     
     # Testing configuration
-    num_samples: 1                     # Number of samples to test (use later 128 samples)
+    num_samples: 64                     # Number of samples to test (use later 128 samples)
     use_later_samples: true              # Whether to use later samples (samples 384-511) instead of first samples
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Baseline testing configuration
-    use_baseline: true                  # Whether to use baseline methods instead of PSN model
-    baseline_mode: "Nearest Neighbor"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
+    use_baseline: false                  # Whether to use baseline methods instead of PSN model
+    baseline_mode: "All"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
     baseline_parameter: 2                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
     
     # Evaluation metrics configuration - automatically set based on test_type

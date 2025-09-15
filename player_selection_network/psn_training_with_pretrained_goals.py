@@ -1766,30 +1766,35 @@ def train_psn_with_pretrained_goals(model: nn.Module, training_data: List[Dict[s
 # MODEL LOADING UTILITIES
 # ============================================================================
 
-def load_trained_models(psn_model_path: str, goal_model_path: str, obs_input_type: str = "full") -> Tuple[PlayerSelectionNetwork, Any, GoalInferenceNetwork, Any]:
+def load_trained_models(psn_model_path: Optional[str], goal_model_path: Optional[str], obs_input_type: str = "full") -> Tuple[Optional[PlayerSelectionNetwork], Any, Optional[GoalInferenceNetwork], Any]:
     """
     Load trained PSN and goal inference models from files.
     
     Args:
-        psn_model_path: Path to the trained PSN model file
-        goal_model_path: Path to the trained goal inference model file
+        psn_model_path: Path to the trained PSN model file (can be None)
+        goal_model_path: Path to the trained goal inference model file (can be None)
         obs_input_type: Observation input type ["full", "partial"]
         
     Returns:
         Tuple of (psn_model, psn_trained_state, goal_model, goal_trained_state)
     """
-    print(f"Loading trained PSN model from: {psn_model_path}")
-    
-    # Load the PSN model bytes
-    with open(psn_model_path, 'rb') as f:
-        psn_model_bytes = pickle.load(f)
-    
-    # Create the PSN model
-    psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims, obs_input_type=obs_input_type)
-    
-    # Deserialize the PSN state
-    psn_trained_state = flax.serialization.from_bytes(psn_model, psn_model_bytes)
-    print("✓ PSN model loaded successfully")
+    # Load PSN model only if path is provided
+    if psn_model_path is not None:
+        print(f"Loading trained PSN model from: {psn_model_path}")
+        
+        # Load the PSN model bytes
+        with open(psn_model_path, 'rb') as f:
+            psn_model_bytes = pickle.load(f)
+        
+        # Create the PSN model
+        psn_model = PlayerSelectionNetwork(hidden_dims=psn_hidden_dims, obs_input_type=obs_input_type)
+        
+        # Deserialize the PSN state
+        psn_trained_state = flax.serialization.from_bytes(psn_model, psn_model_bytes)
+        print("✓ PSN model loaded successfully")
+    else:
+        print("No PSN model provided (using baseline method)")
+        psn_model, psn_trained_state = None, None
     
     # Load goal inference model only if path is provided
     if goal_model_path is not None:

@@ -33,7 +33,7 @@ from config_loader import load_config, get_device_config, setup_jax_config
 
 # Import model classes
 from psn_training_with_pretrained_goals import (
-    PlayerSelectionNetwork, GoalInferenceNetwork, load_trained_models
+    PlayerSelectionNetwork, GoalInferenceNetwork, load_trained_models, load_pretrained_goal_model
 )
 # Import baselines
 from player_selection_network.baselines import baseline_selection
@@ -819,7 +819,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 
                 # Convert to input format for goal inference model
                 goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
-                predicted_goals = goal_model.apply({'params': goal_trained_state['params']}, goal_obs_input, deterministic=True)
+                predicted_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
                 predicted_goals = predicted_goals[0].reshape(n_agents, 2)
             else:
                 raise ValueError(f"Invalid goal_source: {goal_source}. Must be 'true_goals' or 'goal_inference'")
@@ -1260,7 +1260,7 @@ def run_receding_horizon_testing(psn_model_path: str = None,
         print(f"Loading goal inference model...")
         if goal_model_path is None:
             raise ValueError("Goal model path must be provided when goal_source='goal_inference'")
-        _, _, goal_model, goal_trained_state = load_trained_models(None, goal_model_path)
+        goal_model, goal_trained_state = load_pretrained_goal_model(goal_model_path, config.goal_inference.obs_input_type)
         print(f"✓ Goal inference model loaded successfully")
     
     if not use_baseline:
@@ -1457,7 +1457,7 @@ if __name__ == "__main__":
     
     # Set goal model path if goal source is goal_inference (regardless of baseline mode)
     if goal_source == "goal_inference":
-        goal_model_path = f"log/goal_inference_rh_gru_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_rh_best_model.pkl"
+        goal_model_path = f"log/goal_inference_rh_gru_{config.goal_inference.obs_input_type}_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_rh_best_model.pkl"
         
         # Check if goal model exists
         if not os.path.exists(goal_model_path):
