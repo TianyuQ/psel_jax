@@ -809,20 +809,39 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             
             # Use goal source configuration to decide between true goals and goal inference
             goal_source = config.testing.receding_horizon.goal_source
+            test_type = config.testing.receding_horizon.test_type
             
-            if goal_source == "true_goals":
-                # Use true goals for PSN testing
-                predicted_goals = extract_reference_goals(normalized_sample_data)
-            elif goal_source == "goal_inference":
-                # Always use first T_observation steps from the original ground truth trajectory
-                goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
+            if test_type == "planning_test":
+                # Planning test: ego agent's goal is always known (ground truth), other agents' goals depend on goal_source
+                true_goals_all = extract_reference_goals(normalized_sample_data)
                 
-                # Convert to input format for goal inference model
-                goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
-                predicted_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
-                predicted_goals = predicted_goals[0].reshape(n_agents, 2)
-            else:
-                raise ValueError(f"Invalid goal_source: {goal_source}. Must be 'true_goals' or 'goal_inference'")
+                if goal_source == "goal_inference":
+                    # Infer other agents' goals using goal inference model
+                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
+                    goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
+                    inferred_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
+                    inferred_goals = inferred_goals[0].reshape(n_agents, 2)
+                    
+                    # Combine: ego agent uses ground truth, others use inferred
+                    predicted_goals = true_goals_all.at[1:].set(inferred_goals[1:])  # Other agents use inferred goals
+                else:  # goal_source == "true_goals"
+                    # Planning test with true_goals: all agents use ground truth goals
+                    predicted_goals = true_goals_all
+            else:  # prediction_test
+                # Prediction test: all agents' goals are inferred or true based on goal_source
+                if goal_source == "true_goals":
+                    # Use true goals for all agents
+                    predicted_goals = extract_reference_goals(normalized_sample_data)
+                elif goal_source == "goal_inference":
+                    # Always use first T_observation steps from the original ground truth trajectory
+                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
+                    
+                    # Convert to input format for goal inference model
+                    goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
+                    predicted_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
+                    predicted_goals = predicted_goals[0].reshape(n_agents, 2)
+                else:
+                    raise ValueError(f"Invalid goal_source: {goal_source}. Must be 'true_goals' or 'goal_inference'")
             
             # Get true goals for comparison
             true_goals = extract_reference_goals(normalized_sample_data)
@@ -1469,8 +1488,14 @@ if __name__ == "__main__":
         # Model paths - PSN from goal_true directory
         # PSN was trained with true goals, so load from goal_true_xxx directory
         # Include observation input type (full/partial) in the model path
+        # Use different model names for prediction vs planning tests
         obs_input_type = config.psn.obs_input_type
-        psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/psn_gru_{obs_input_type}_true_goals_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
+        if test_type == "planning_test":
+            model_name = f"psn_gru_{obs_input_type}_planning_true_goals"
+        else:  # prediction_test
+            model_name = f"psn_gru_{obs_input_type}_true_goals"
+        
+        psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/{model_name}_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
         
         # Check if PSN model exists
         if not os.path.exists(psn_model_path):
@@ -1615,6 +1640,11 @@ if __name__ == "__main__":
             consistency_values = [r['consistency_metric'] for r in results if r['consistency_metric'] is not None]
             if consistency_values:
                 f.write(f"  - Consistency Metric: {np.mean(consistency_values):.4f} ± {np.std(consistency_values):.4f}\n")
+            
+            # Mean number of selected agents
+            num_selected_values = [r['num_selected_agents'] for r in results if r['num_selected_agents'] is not None]
+            if num_selected_values:
+                f.write(f"  - Average Selected Agents: {np.mean(num_selected_values):.2f} ± {np.std(num_selected_values):.2f}\n")
             
             # Computation time
             computation_times = [r['mean_computation_time'] for r in results if r['mean_computation_time'] > 0]

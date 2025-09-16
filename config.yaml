@@ -139,8 +139,8 @@ psn:
   num_epochs: 100            # Number of training epochs
   
   # Loss function weights
-  sigma1: 0.075              # Weight for mask sparsity loss
-  sigma2: 0.075               # Weight for mask diversity loss
+  sigma1: 0.5              # Weight for mask sparsity loss
+  sigma2: 0.5               # Weight for mask diversity loss
   
   # Goal source configuration
   # IMPORTANT: This setting affects testing behavior:
@@ -240,14 +240,14 @@ testing:
   receding_horizon:
     # Test type configuration - Choose the main test category
     # 1. prediction_test: All agents' goals are not known (test goal inference + player selection)
-    # 2. planning_test: Ego agent's goal is always known (test player selection only)
-    test_type: "prediction_test"         # ["prediction_test", "planning_test"]
+    # 2. planning_test: Ego agent's goal is known, other agents' goals are inferred (test player selection only)
+    test_type: "planning_test"         # ["prediction_test", "planning_test"]
     
     # Goal source configuration for testing
     # 1a. prediction_test + true_goals: Use true goals for all agents
     # 1b. prediction_test + goal_inference: Use inferred goals for all agents  
     # 2a. planning_test + true_goals: Use true goals for all agents
-    # 2b. planning_test + goal_inference: Use inferred goals for all agents
+    # 2b. planning_test + goal_inference: Ego agent uses true goals, other agents use inferred goals
     goal_source: "goal_inference"            # ["true_goals", "goal_inference"]
     
     # Two-phase approach configuration
@@ -268,9 +268,9 @@ testing:
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Baseline testing configuration
-    use_baseline: false                  # Whether to use baseline methods instead of PSN model
-    baseline_mode: "All"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
-    baseline_parameter: 2                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
+    use_baseline: true                  # Whether to use baseline methods instead of PSN model
+    baseline_mode: "Distance Threshold"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
+    baseline_parameter: 1                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
     
     # Evaluation metrics configuration - automatically set based on test_type
     # prediction_test: compute_prediction_metrics=true, compute_planning_metrics=true
