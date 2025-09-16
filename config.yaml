@@ -111,7 +111,7 @@ goal_inference:
   observation_length: 10    # Length of observation history (K_observation)
   
   # Observation input options
-  obs_input_type: "full"    # Observation input type ["full", "partial"]
+  obs_input_type: "partial"    # Observation input type ["full", "partial"]
   # - "full": Use full state (x, y, vx, vy) - 4 dimensions per agent
   # - "partial": Use position only (x, y) - 2 dimensions per agent
   
@@ -139,8 +139,8 @@ psn:
   num_epochs: 100            # Number of training epochs
   
   # Loss function weights
-  sigma1: 0.5              # Weight for mask sparsity loss
-  sigma2: 0.5               # Weight for mask diversity loss
+  sigma1: 0.075              # Weight for mask sparsity loss
+  sigma2: 0.075               # Weight for mask diversity loss
   
   # Goal source configuration
   # IMPORTANT: This setting affects testing behavior:
@@ -150,7 +150,7 @@ psn:
   use_true_goals: true     # Whether to use true goals instead of predicted goals from goal inference model
   
   # Observation input options
-  obs_input_type: "full"    # Observation input type ["full", "partial"]
+  obs_input_type: "partial"    # Observation input type ["full", "partial"]
   # - "full": Use full state (x, y, vx, vy) - 4 dimensions per agent
   # - "partial": Use position only (x, y) - 2 dimensions per agent
   
@@ -241,14 +241,14 @@ testing:
     # Test type configuration - Choose the main test category
     # 1. prediction_test: All agents' goals are not known (test goal inference + player selection)
     # 2. planning_test: Ego agent's goal is known, other agents' goals are inferred (test player selection only)
-    test_type: "planning_test"         # ["prediction_test", "planning_test"]
+    test_type: "prediction_test"         # ["prediction_test", "planning_test"]
     
     # Goal source configuration for testing
     # 1a. prediction_test + true_goals: Use true goals for all agents
     # 1b. prediction_test + goal_inference: Use inferred goals for all agents  
     # 2a. planning_test + true_goals: Use true goals for all agents
     # 2b. planning_test + goal_inference: Ego agent uses true goals, other agents use inferred goals
-    goal_source: "goal_inference"            # ["true_goals", "goal_inference"]
+    goal_source: "true_goals"            # ["true_goals", "goal_inference"]
     
     # Two-phase approach configuration
     initial_stabilization_iterations: 0  # No stabilization period - use PSN and goal inference from step 10
@@ -258,7 +258,7 @@ testing:
     # - "threshold": Select agents with mask values > mask_threshold (default behavior)
     # - "rank": Select top N agents based on mask values (rank = N means select N-1 other agents)
     # Note: Baseline methods use their own internal selection logic and ignore these parameters
-    selection_method: "rank"        # ["threshold", "rank"] - only for PSN methods
+    selection_method: "threshold"        # ["threshold", "rank"] - only for PSN methods
     mask_threshold: 0.5                  # Threshold for agent selection when using "threshold" method
     rank: 2                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
     
@@ -268,9 +268,9 @@ testing:
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Baseline testing configuration
-    use_baseline: true                  # Whether to use baseline methods instead of PSN model
-    baseline_mode: "Distance Threshold"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
-    baseline_parameter: 1                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
+    use_baseline: false                  # Whether to use baseline methods instead of PSN model
+    baseline_mode: "All"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
+    baseline_parameter: 2                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
     
     # Evaluation metrics configuration - automatically set based on test_type
     # prediction_test: compute_prediction_metrics=true, compute_planning_metrics=true

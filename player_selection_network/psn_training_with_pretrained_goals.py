@@ -1878,6 +1878,7 @@ if __name__ == "__main__":
         'best_loss': best_loss,
         'best_epoch': best_epoch,
         'use_true_goals': use_true_goals,
+        'obs_input_type': config.psn.obs_input_type,  # Track observation input type
         'goal_inference_model_path': pretrained_goal_model_path if not use_true_goals else None,
         'goal_inference_model_dir': os.path.dirname(pretrained_goal_model_path) if not use_true_goals else None
     }
@@ -1907,6 +1908,7 @@ if __name__ == "__main__":
         f.write(f"  - Batch Size: {batch_size}\n")
         f.write(f"  - Sigma1: {sigma1}\n")
         f.write(f"  - Sigma2: {sigma2}\n")
+        f.write(f"  - Observation Input Type: {config.psn.obs_input_type}\n")
         f.write(f"  - N_agents: {N_agents}\n")
         f.write(f"  - T_total: {T_total}\n")
         f.write(f"  - T_observation: {T_observation}\n\n")

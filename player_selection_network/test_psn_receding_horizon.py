@@ -887,7 +887,17 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             
             # Convert to array and reshape to (1, T_observation, n_agents, state_dim)
             obs_array = jnp.array(obs_traj)  # (T_observation, n_agents, state_dim)
-            obs_input = obs_array.reshape(1, T_observation, n_agents, 4)  # (1, 10, 4, 4)
+            
+            # Determine state dimension based on PSN configuration
+            psn_obs_input_type = config.psn.obs_input_type
+            if psn_obs_input_type == "partial":
+                state_dim = 2  # Only position (x, y)
+                # Extract only position coordinates (x, y) for PSN
+                obs_array = obs_array[:, :, :2]  # Keep only x, y coordinates
+            else:  # full
+                state_dim = 4  # Full state (x, y, vx, vy)
+            
+            obs_input = obs_array.reshape(1, T_observation, n_agents, state_dim)
         
             # Use baseline or PSN model based on configuration
             if use_baseline:
@@ -1287,7 +1297,7 @@ def run_receding_horizon_testing(psn_model_path: str = None,
         print(f"Loading PSN model...")
         if psn_model_path is None:
             raise ValueError("PSN model path must be provided when use_baseline=False")
-        psn_model, psn_trained_state, _, _ = load_trained_models(psn_model_path, None)
+        psn_model, psn_trained_state, _, _ = load_trained_models(psn_model_path, None, config.psn.obs_input_type)
         print(f"✓ PSN model loaded successfully")
     else:
         print(f"Using baseline method: {baseline_mode}")
