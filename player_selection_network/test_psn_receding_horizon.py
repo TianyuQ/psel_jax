@@ -635,23 +635,32 @@ def normalize_sample_data(sample_data: Dict[str, Any]) -> Dict[str, Any]:
     return normalized_data
 
 
-def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
+def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: str = "full") -> jnp.ndarray:
     """
     Extract observation trajectory (first 10 steps) for all agents.
     This matches the format used in goal inference training.
     
     Args:
         sample_data: Reference trajectory sample
+        obs_input_type: Observation input type ["full", "partial"]
         
     Returns:
-        observation_trajectory: Observation trajectory (T_observation, N_agents, state_dim)
+        observation_trajectory: Observation trajectory 
+            - If obs_input_type="full": (T_observation, N_agents, 4)
+            - If obs_input_type="partial": (T_observation, N_agents, 2)
     """
     # Normalize data structure first
     normalized_data = normalize_sample_data(sample_data)
     
+    # Determine output dimensions based on observation type
+    if obs_input_type == "partial":
+        output_dim = 2  # Only position (x, y)
+    else:  # "full"
+        output_dim = 4  # Full state (x, y, vx, vy)
+    
     # Initialize array to store all agent states
-    # Shape: (T_observation, N_agents, state_dim)
-    observation_trajectory = jnp.zeros((T_observation, n_agents, 4))  # state_dim = 4
+    # Shape: (T_observation, N_agents, output_dim)
+    observation_trajectory = jnp.zeros((T_observation, n_agents, output_dim))
     
     for i in range(n_agents):
         agent_key = f"agent_{i}"
@@ -667,8 +676,16 @@ def extract_observation_trajectory(sample_data: Dict[str, Any]) -> jnp.ndarray:
                 agent_states_padded.append(last_state)
             agent_states_array = jnp.array(agent_states_padded[:T_observation])
         
-        # Place in the correct position: (T_observation, N_agents, state_dim)
-        observation_trajectory = observation_trajectory.at[:, i, :].set(agent_states_array)
+        # Extract relevant dimensions based on observation type
+        if obs_input_type == "partial":
+            # Only use position (x, y) - first 2 dimensions
+            agent_obs = agent_states_array[:, :2]  # (T_observation, 2)
+        else:  # "full"
+            # Use full state (x, y, vx, vy) - all 4 dimensions
+            agent_obs = agent_states_array[:, :4]  # (T_observation, 4)
+        
+        # Place in the correct position: (T_observation, N_agents, output_dim)
+        observation_trajectory = observation_trajectory.at[:, i, :].set(agent_obs)
     
     return observation_trajectory
 
@@ -817,7 +834,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 
                 if goal_source == "goal_inference":
                     # Infer other agents' goals using goal inference model
-                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
+                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data, config.goal_inference.obs_input_type)
                     goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
                     inferred_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
                     inferred_goals = inferred_goals[0].reshape(n_agents, 2)
@@ -834,7 +851,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                     predicted_goals = extract_reference_goals(normalized_sample_data)
                 elif goal_source == "goal_inference":
                     # Always use first T_observation steps from the original ground truth trajectory
-                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data)
+                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data, config.goal_inference.obs_input_type)
                     
                     # Convert to input format for goal inference model
                     goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)

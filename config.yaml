@@ -248,7 +248,7 @@ testing:
     # 1b. prediction_test + goal_inference: Use inferred goals for all agents  
     # 2a. planning_test + true_goals: Use true goals for all agents
     # 2b. planning_test + goal_inference: Ego agent uses true goals, other agents use inferred goals
-    goal_source: "true_goals"            # ["true_goals", "goal_inference"]
+    goal_source: "goal_inference"            # ["true_goals", "goal_inference"]
     
     # Two-phase approach configuration
     initial_stabilization_iterations: 0  # No stabilization period - use PSN and goal inference from step 10
@@ -258,7 +258,7 @@ testing:
     # - "threshold": Select agents with mask values > mask_threshold (default behavior)
     # - "rank": Select top N agents based on mask values (rank = N means select N-1 other agents)
     # Note: Baseline methods use their own internal selection logic and ignore these parameters
-    selection_method: "threshold"        # ["threshold", "rank"] - only for PSN methods
+    selection_method: "rank"        # ["threshold", "rank"] - only for PSN methods
     mask_threshold: 0.5                  # Threshold for agent selection when using "threshold" method
     rank: 2                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
     
