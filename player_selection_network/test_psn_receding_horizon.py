@@ -56,6 +56,100 @@ print(f"Using device: {device}")
 # PLAYER SELECTION UTILITIES
 # ============================================================================
 
+def apply_nearest_neighbor_selection(normalized_sample_data: dict,
+                                   current_game_state: dict,
+                                   n_agents: int,
+                                   T_observation: int,
+                                   iteration: int) -> Tuple[dict, jnp.ndarray, int]:
+    """
+    Apply nearest neighbor selection to reduce agents from >10 to 10 for PSN processing.
+    
+    Args:
+        normalized_sample_data: Original sample data with all agents
+        current_game_state: Current game state with computed trajectories
+        n_agents: Original number of agents
+        T_observation: Observation period length
+        iteration: Current iteration number
+        
+    Returns:
+        Tuple of (filtered_sample_data, selected_agent_indices, n_agents_effective)
+    """
+    # Get current states of all agents at the current iteration
+    all_agent_states = []
+    for agent_idx in range(n_agents):
+        agent_key = f"agent_{agent_idx}"
+        
+        if agent_idx == 0:  # Ego agent: use computed trajectory
+            if agent_key in current_game_state["trajectories"]:
+                ego_trajectory = current_game_state["trajectories"][agent_key]["states"]
+                if len(ego_trajectory) > 0:
+                    current_state = ego_trajectory[-1]  # Latest computed state
+                else:
+                    # Fallback to ground truth
+                    original_states = normalized_sample_data["trajectories"][agent_key]["states"]
+                    current_step = T_observation + iteration - 1
+                    current_state = original_states[current_step] if current_step < len(original_states) else original_states[-1]
+            else:
+                # Fallback to ground truth
+                original_states = normalized_sample_data["trajectories"][agent_key]["states"]
+                current_step = T_observation + iteration - 1
+                current_state = original_states[current_step] if current_step < len(original_states) else original_states[-1]
+        else:  # Other agents: use ground truth trajectory
+            original_states = normalized_sample_data["trajectories"][agent_key]["states"]
+            current_step = T_observation + iteration - 1
+            current_state = original_states[current_step] if current_step < len(original_states) else original_states[-1]
+        
+        all_agent_states.append(jnp.array(current_state))
+    
+    # Separate ego agent (index 0) from other agents
+    ego_state = all_agent_states[0]
+    other_agent_states = jnp.array(all_agent_states[1:])  # (n_agents-1, state_dim)
+    
+    # Select 9 nearest neighbors (for 10-player game total)
+    selected_neighbor_indices = select_nearest_neighbors(ego_state, other_agent_states, num_neighbors=9)
+    
+    # Map back to original agent indices
+    selected_agent_indices = jnp.concatenate([jnp.array([0]), selected_neighbor_indices + 1])  # Include ego agent
+    
+    # Create filtered sample data with selected agents
+    filtered_trajectories = {}
+    for i, agent_idx in enumerate(selected_agent_indices):
+        original_key = f"agent_{agent_idx}"
+        new_key = f"agent_{i}"
+        filtered_trajectories[new_key] = normalized_sample_data["trajectories"][original_key].copy()
+    
+    filtered_sample_data = normalized_sample_data.copy()
+    filtered_sample_data["trajectories"] = filtered_trajectories
+    
+    return filtered_sample_data, selected_agent_indices, 10
+
+
+def select_nearest_neighbors(ego_state: jnp.ndarray,
+                           other_agent_states: jnp.ndarray,
+                           num_neighbors: int = 9) -> jnp.ndarray:
+    """
+    Select the nearest neighbors to the ego agent based on Euclidean distance.
+    
+    Args:
+        ego_state: Current state of the ego agent [x, y, vx, vy] or [x, y]
+        other_agent_states: Array of states for other agents (n_agents-1, state_dim)
+        num_neighbors: Number of neighbors to select (default: 9 for 10-player game)
+    
+    Returns:
+        Array of indices of selected neighbors (0-indexed relative to other_agent_states)
+    """
+    # Extract position coordinates (first 2 elements)
+    ego_pos = ego_state[:2]  # [x, y]
+    other_positions = other_agent_states[:, :2]  # (n_agents-1, 2)
+    
+    # Compute Euclidean distances
+    distances = jnp.linalg.norm(other_positions - ego_pos, axis=1)
+    
+    # Get indices of nearest neighbors
+    nearest_indices = jnp.argsort(distances)[:num_neighbors]
+    
+    return nearest_indices
+
 def select_agents_by_mask(predicted_mask: jnp.ndarray, 
                          selection_method: str = "threshold",
                          mask_threshold: float = 0.5,
@@ -635,7 +729,7 @@ def normalize_sample_data(sample_data: Dict[str, Any]) -> Dict[str, Any]:
     return normalized_data
 
 
-def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: str = "full") -> jnp.ndarray:
+def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: str = "full", num_agents: int = None) -> jnp.ndarray:
     """
     Extract observation trajectory (first 10 steps) for all agents.
     This matches the format used in goal inference training.
@@ -643,12 +737,16 @@ def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: 
     Args:
         sample_data: Reference trajectory sample
         obs_input_type: Observation input type ["full", "partial"]
+        num_agents: Number of agents to process (default: use global n_agents)
         
     Returns:
         observation_trajectory: Observation trajectory 
             - If obs_input_type="full": (T_observation, N_agents, 4)
             - If obs_input_type="partial": (T_observation, N_agents, 2)
     """
+    if num_agents is None:
+        num_agents = n_agents
+    
     # Normalize data structure first
     normalized_data = normalize_sample_data(sample_data)
     
@@ -660,9 +758,9 @@ def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: 
     
     # Initialize array to store all agent states
     # Shape: (T_observation, N_agents, output_dim)
-    observation_trajectory = jnp.zeros((T_observation, n_agents, output_dim))
+    observation_trajectory = jnp.zeros((T_observation, num_agents, output_dim))
     
-    for i in range(n_agents):
+    for i in range(num_agents):
         agent_key = f"agent_{i}"
         agent_states = normalized_data["trajectories"][agent_key]["states"]
         # Take first T_observation steps
@@ -690,17 +788,20 @@ def extract_observation_trajectory(sample_data: Dict[str, Any], obs_input_type: 
     return observation_trajectory
 
 
-def extract_reference_goals(sample_data: Dict[str, Any]) -> jnp.ndarray:
+def extract_reference_goals(sample_data: Dict[str, Any], num_agents: int = None) -> jnp.ndarray:
     """Extract reference goals from sample data."""
+    if num_agents is None:
+        num_agents = n_agents
+    
     # Use the target_positions field directly from the sample data
     if 'target_positions' in sample_data:
         return jnp.array(sample_data['target_positions'])
     else:
         # Fallback: extract from final trajectory positions
         goals = []
-        for agent_idx in range(n_agents):
+        for agent_idx in range(num_agents):
             agent_key = f"agent_{agent_idx}"
-            agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
+            agent_states = sample_data["trajectories"][agent_key]["states"]
             if len(agent_states) > 0:
                 # Use the final position as the goal
                 final_state = agent_states[-1]
@@ -742,6 +843,25 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     # Normalize sample data to handle different formats
     normalized_sample_data = normalize_sample_data(sample_data)
     
+    # Apply nearest neighbor selection strategy based on method type
+    if n_agents > 10:
+        if use_baseline:
+            # For baseline methods: no nearest neighbor preprocessing needed
+            n_agents_effective = n_agents
+            selected_agent_indices = jnp.arange(n_agents)  # All agents selected
+            print(f"    Using all {n_agents} agents (baseline method - no nearest neighbor selection)")
+        else:
+            # For PSN methods: will apply nearest neighbor selection at each iteration
+            # Keep original data for per-iteration selection
+            n_agents_effective = 10  # Will be determined at each iteration
+            selected_agent_indices = None  # Will be determined at each iteration
+            print(f"    PSN method detected: will apply nearest neighbor selection at each iteration")
+    else:
+        # No filtering needed for scenarios with ≤10 agents
+        n_agents_effective = n_agents
+        selected_agent_indices = jnp.arange(n_agents)  # All agents selected
+        print(f"    Using all {n_agents} agents (≤10 agents - no nearest neighbor selection needed)")
+    
     # Initialize results storage
     results = {
         'sample_id': sample_data['sample_id'],
@@ -768,7 +888,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 "states": [],
                 "controls": []
             }
-            for i in range(n_agents)
+            for i in range(n_agents_effective)
         }
     }
     
@@ -776,7 +896,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     print(f"    Phase 1: Observation period (steps 1-{T_observation})")
     for step in range(T_observation):
         # Add ground truth states for all agents
-        for agent_idx in range(n_agents):
+        for agent_idx in range(n_agents_effective):
             agent_key = f"agent_{agent_idx}"
             agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
             
@@ -796,12 +916,12 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     sample_start_time = time.time()
     
     # Initialize receding horizon trajectories
-    receding_horizon_trajectories = [[] for _ in range(n_agents)]
-    receding_horizon_states = [[] for _ in range(n_agents)]
+    receding_horizon_trajectories = [[] for _ in range(n_agents_effective)]
+    receding_horizon_states = [[] for _ in range(n_agents_effective)]
     
     # Current states (start with states at end of observation period)
     current_states = []
-    for agent_idx in range(n_agents):
+    for agent_idx in range(n_agents_effective):
         agent_key = f"agent_{agent_idx}"
         agent_states = current_game_state["trajectories"][agent_key]["states"]
         if len(agent_states) > 0:
@@ -811,14 +931,30 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             sample_states = normalized_sample_data["trajectories"][agent_key]["states"]
             current_states.append(jnp.array(sample_states[T_observation - 1] if len(sample_states) >= T_observation else sample_states[-1]))
     
+    # Store original sample data for nearest neighbor selection
+    original_sample_data = normalized_sample_data.copy()
+    
     # Main receding horizon loop
     for iteration in range(T_receding_horizon_iterations):
+        # Apply nearest neighbor selection at each iteration for PSN methods
+        if n_agents > 10 and not use_baseline:
+            # Apply nearest neighbor selection for PSN methods
+            filtered_sample_data, selected_agent_indices, n_agents_effective = apply_nearest_neighbor_selection(
+                original_sample_data, current_game_state, n_agents, T_observation, iteration
+            )
+            if iteration == config.testing.receding_horizon.initial_stabilization_iterations:
+                print(f"    Phase 2: Receding horizon planning with models (steps {T_observation+1} to {T_total})")
+                print(f"        Applying nearest neighbor selection at each iteration")
+        else:
+            # Use original data for baseline methods or scenarios with ≤10 agents
+            filtered_sample_data = normalized_sample_data
+        
         # Decide whether to use models or default values based on iteration
         if iteration < config.testing.receding_horizon.initial_stabilization_iterations:
             # First N iterations: Use ground truth goals and all agents (mask = 1)
-            predicted_goals = extract_reference_goals(normalized_sample_data)
-            predicted_mask = jnp.ones(n_agents - 1)  # All 1s for mask (no selection)
-            num_selected = n_agents - 1  # All other agents selected
+            predicted_goals = extract_reference_goals(filtered_sample_data, n_agents_effective)
+            predicted_mask = jnp.ones(n_agents_effective - 1)  # All 1s for mask (no selection)
+            num_selected = n_agents_effective - 1  # All other agents selected
             mask_sparsity = 0.0  # No sparsity
             true_goals = predicted_goals  # Same as predicted for this phase
         else:
@@ -830,14 +966,15 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             
             if test_type == "planning_test":
                 # Planning test: ego agent's goal is always known (ground truth), other agents' goals depend on goal_source
-                true_goals_all = extract_reference_goals(normalized_sample_data)
+                true_goals_all = extract_reference_goals(filtered_sample_data, n_agents_effective)
                 
                 if goal_source == "goal_inference":
                     # Infer other agents' goals using goal inference model
-                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data, config.goal_inference.obs_input_type)
+                    goal_obs_traj = extract_observation_trajectory(filtered_sample_data, config.goal_inference.obs_input_type, n_agents_effective)
                     goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
-                    inferred_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
-                    inferred_goals = inferred_goals[0].reshape(n_agents, 2)
+                    
+                    inferred_goals = goal_model.apply({'params': goal_trained_state['params']}, goal_obs_input, deterministic=True)
+                    inferred_goals = inferred_goals[0].reshape(n_agents_effective, 2)
                     
                     # Combine: ego agent uses ground truth, others use inferred
                     predicted_goals = true_goals_all.at[1:].set(inferred_goals[1:])  # Other agents use inferred goals
@@ -848,20 +985,21 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 # Prediction test: all agents' goals are inferred or true based on goal_source
                 if goal_source == "true_goals":
                     # Use true goals for all agents
-                    predicted_goals = extract_reference_goals(normalized_sample_data)
+                    predicted_goals = extract_reference_goals(filtered_sample_data, n_agents_effective)
                 elif goal_source == "goal_inference":
                     # Always use first T_observation steps from the original ground truth trajectory
-                    goal_obs_traj = extract_observation_trajectory(normalized_sample_data, config.goal_inference.obs_input_type)
+                    goal_obs_traj = extract_observation_trajectory(filtered_sample_data, config.goal_inference.obs_input_type, n_agents_effective)
                     
                     # Convert to input format for goal inference model
                     goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
-                    predicted_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
-                    predicted_goals = predicted_goals[0].reshape(n_agents, 2)
+                    
+                    predicted_goals = goal_model.apply({'params': goal_trained_state['params']}, goal_obs_input, deterministic=True)
+                    predicted_goals = predicted_goals[0].reshape(n_agents_effective, 2)
                 else:
                     raise ValueError(f"Invalid goal_source: {goal_source}. Must be 'true_goals' or 'goal_inference'")
             
             # Get true goals for comparison
-            true_goals = extract_reference_goals(normalized_sample_data)
+            true_goals = extract_reference_goals(filtered_sample_data, n_agents_effective)
             
             # Step 2: Infer player selection using current observation
             # Construct observation trajectory using LATEST 10 steps (sliding window)
@@ -881,7 +1019,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 actual_step = obs_start_step + obs_step
                 step_states = []
                 
-                for agent_idx in range(n_agents):
+                for agent_idx in range(n_agents_effective):
                     agent_key = f"agent_{agent_idx}"
                     if agent_idx == 0:  # Ego agent: use computed accumulated trajectory
                         agent_states = current_game_state["trajectories"][agent_key]["states"]
@@ -892,7 +1030,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                             last_state = agent_states[-1] if agent_states else [0.0, 0.0, 0.0, 0.0]
                             step_states.append(last_state)
                     else:  # Other agents: use ground truth receding horizon trajectory
-                        agent_states = normalized_sample_data["trajectories"][agent_key]["states"]
+                        agent_states = filtered_sample_data["trajectories"][agent_key]["states"]
                         if actual_step < len(agent_states):
                             step_states.append(agent_states[actual_step])
                         else:
@@ -902,8 +1040,8 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 
                 obs_traj.append(step_states)
             
-            # Convert to array and reshape to (1, T_observation, n_agents, state_dim)
-            obs_array = jnp.array(obs_traj)  # (T_observation, n_agents, state_dim)
+            # Convert to array and reshape to (1, T_observation, n_agents_effective, state_dim)
+            obs_array = jnp.array(obs_traj)  # (T_observation, n_agents_effective, state_dim)
             
             # Determine state dimension based on PSN configuration
             psn_obs_input_type = config.psn.obs_input_type
@@ -914,22 +1052,26 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             else:  # full
                 state_dim = 4  # Full state (x, y, vx, vy)
             
-            obs_input = obs_array.reshape(1, T_observation, n_agents, state_dim)
+            # For PSN model, we need to provide flattened input: (batch_size, T_observation * n_agents_effective * state_dim)
+            obs_input = obs_array.reshape(1, T_observation * n_agents_effective * state_dim)
         
             # Use baseline or PSN model based on configuration
             if use_baseline:
                 # Use baseline method
                 mode_parameter = config.testing.receding_horizon.baseline_parameter
-                trajectory_history = [np.array(current_game_state["trajectories"][f"agent_{i}"]["states"]) for i in range(n_agents)]
+                trajectory_history = [np.array(current_game_state["trajectories"][f"agent_{i}"]["states"]) for i in range(n_agents_effective)]
                 
                 
                 if iteration > config.testing.receding_horizon.initial_stabilization_iterations:
                     prev_controls = [np.array(c) for c in results['receding_horizon_results'][-1]['first_controls']]
                 else:
-                    prev_controls = [np.zeros(2) for _ in range(n_agents)]
+                    prev_controls = [np.zeros(2) for _ in range(n_agents_effective)]
 
+                # For baseline methods, we need to provide input in (batch_size, T_observation, n_agents, state_dim) format
+                obs_input_baseline = obs_array.reshape(1, T_observation, n_agents_effective, state_dim)
+                
                 predicted_mask = baseline_selection(
-                    input_traj=obs_input,
+                    input_traj=obs_input_baseline,
                     trajectory=trajectory_history,
                     control=prev_controls,
                     mode=baseline_mode,
@@ -940,6 +1082,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 # Use PSN model
                 if psn_model is None or psn_trained_state is None:
                     raise ValueError("PSN model and state must be provided when use_baseline=False")
+                
                 predicted_mask = psn_model.apply({'params': psn_trained_state['params']}, obs_input, deterministic=True)
                 predicted_mask = predicted_mask[0]  # Remove batch dimension
             
@@ -956,7 +1099,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 # Baseline method: use simple threshold (baseline already returns binary mask)
                 selected_agents = jnp.where(predicted_mask > 0.5)[0]  # Baseline returns 0/1 values
                 num_selected = len(selected_agents)
-                mask_sparsity = num_selected / (n_agents - 1)
+                mask_sparsity = num_selected / (n_agents_effective - 1)
         
         # Step 3: Solve receding horizon game with predicted goals
         # Apply masking: only include selected agents (EXACTLY like training script)
@@ -985,8 +1128,8 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 agents, filtered_current_states, filtered_predicted_goals, compiled_functions)
             
             # Map results back to full agent list for compatibility with rest of code
-            full_first_controls = [jnp.zeros(2) for _ in range(n_agents)]  # Default zero controls
-            full_trajectories_expanded = [jnp.zeros((T_receding_horizon_planning, 4)) for _ in range(n_agents)]
+            full_first_controls = [jnp.zeros(2) for _ in range(n_agents_effective)]  # Default zero controls
+            full_trajectories_expanded = [jnp.zeros((T_receding_horizon_planning, 4)) for _ in range(n_agents_effective)]
             
             for i, agent_idx in enumerate(selected_agents):
                 full_first_controls[agent_idx] = first_controls[i]
@@ -1027,7 +1170,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         results['receding_horizon_results'].append(iteration_result)
         
         # Step 5: Apply first controls to move agents forward one step
-        for i in range(n_agents):
+        for i in range(n_agents_effective):
             if i == 0:  # Ego agent: apply computed control and update state
                 # Get current state and control
                 current_state = current_states[i]
@@ -1089,7 +1232,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         
         # Extract other agent ground truth trajectories for analysis period
         other_ground_truth_trajectories = []
-        for i in range(n_agents):
+        for i in range(n_agents_effective):
             if i != ego_agent_id:
                 other_traj = jnp.array(normalized_sample_data["trajectories"][f"agent_{i}"]["states"])
                 other_traj_analysis = other_traj[analysis_start_step:analysis_end_step]
@@ -1140,6 +1283,14 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             # Goal RMSE
             pred_goals = jnp.array(iter_result['predicted_goals'])
             true_goals = jnp.array(iter_result['true_goals'])
+            
+            # Handle shape mismatch for per-iteration nearest neighbor selection
+            if pred_goals.shape != true_goals.shape:
+                # Use the minimum shape to avoid broadcasting errors
+                min_agents = min(pred_goals.shape[0], true_goals.shape[0])
+                pred_goals = pred_goals[:min_agents]
+                true_goals = true_goals[:min_agents]
+            
             goal_rmse = jnp.sqrt(jnp.mean(jnp.square(pred_goals - true_goals)))
             goal_rmse_values.append(float(goal_rmse))
             
@@ -1235,6 +1386,37 @@ def run_receding_horizon_testing(psn_model_path: str = None,
     Returns:
         List of test results for each sample
     """
+    
+    # Set global N_agents for model compatibility if needed for nearest neighbor selection
+    original_n_agents = None
+    if config.game.N_agents > 10:
+        # Import and set the global variable before any model loading
+        import psn_training_with_pretrained_goals as psn_module
+        original_n_agents = psn_module.N_agents
+        psn_module.N_agents = 10
+        print(f"Set global N_agents from {original_n_agents} to 10 for 10-agent model compatibility")
+        
+        # Recalculate hidden dimensions and mask output dim after setting N_agents
+        if psn_module.N_agents == 10:
+            psn_module.psn_hidden_dims = psn_module.config.psn.hidden_dims_10p
+            psn_module.goal_inference_hidden_dims = psn_module.config.goal_inference.hidden_dims_10p
+            # Update mask_output_dim for 10 agents (9 other agents)
+            psn_module.mask_output_dim = 9
+            print(f"Updated hidden dimensions to 10-agent values: {psn_module.psn_hidden_dims}")
+            print(f"Updated mask_output_dim to: {psn_module.mask_output_dim}")
+            
+            # Patch the PlayerSelectionNetwork class to use the correct mask_output_dim
+            psn_module.PlayerSelectionNetwork.mask_output_dim = 9  # Force 10-agent mask output
+            print("Patched PlayerSelectionNetwork.mask_output_dim to 9 for 10-agent compatibility")
+        
+        # Also update goal inference module if it exists
+        try:
+            import goal_inference.pretrain_goal_inference_rh as goal_module
+            goal_module.N_agents = 10
+            print(f"Also updated goal inference module N_agents to 10")
+        except ImportError:
+            pass  # Goal inference module not needed for this test
+    
     print("=" * 80)
     print("RECEDING HORIZON TESTING WITH GOAL INFERENCE AND PLAYER SELECTION MODELS")
     print("=" * 80)
@@ -1276,24 +1458,26 @@ def run_receding_horizon_testing(psn_model_path: str = None,
             method_name = baseline_mode.lower().replace(' ', '_').replace('_', '')
             baseline_param = config.testing.receding_horizon.baseline_parameter
             goal_suffix = "goal_inference" if goal_source == "goal_inference" else "goal_true"
-            output_dir = f"baseline_results/{test_type}/N_{config.game.N_agents}/receding_horizon_results_{method_name}_param_{baseline_param}_{goal_suffix}"
+            n_agents = config.game.N_agents
+            output_dir = f"baseline_results/{test_type}/N_{n_agents}/receding_horizon_results_{n_agents}_{method_name}_param_{baseline_param}_{goal_suffix}"
         else:
+            n_agents = config.game.N_agents
             if goal_source == "true_goals":
                 # Extract method name from PSN model path if available
                 if psn_model_path:
                     psn_model_name = os.path.basename(psn_model_path).replace('.pkl', '')
-                    output_dir = f"receding_horizon_results_{test_type}_goal_true_{psn_model_name}"
+                    output_dir = f"receding_horizon_results_{n_agents}_{test_type}_goal_true_{psn_model_name}"
                 else:
-                    output_dir = f"receding_horizon_results_{test_type}_goal_true"
+                    output_dir = f"receding_horizon_results_{n_agents}_{test_type}_goal_true"
             elif goal_source == "goal_inference":
                 # Always use first_steps for goal inference
                 if psn_model_path:
                     psn_model_name = os.path.basename(psn_model_path).replace('.pkl', '')
-                    output_dir = f"receding_horizon_results_{test_type}_goal_inference_{psn_model_name}"
+                    output_dir = f"receding_horizon_results_{n_agents}_{test_type}_goal_inference_{psn_model_name}"
                 else:
-                    output_dir = f"receding_horizon_results_{test_type}_goal_inference"
+                    output_dir = f"receding_horizon_results_{n_agents}_{test_type}_goal_inference"
             else:
-                output_dir = f"receding_horizon_test_results_{test_type}"
+                output_dir = f"receding_horizon_results_{n_agents}_{test_type}"
     
     # Load models based on goal source and baseline configuration
     psn_model, psn_trained_state, goal_model, goal_trained_state = None, None, None, None
@@ -1306,16 +1490,60 @@ def run_receding_horizon_testing(psn_model_path: str = None,
         print(f"Loading goal inference model...")
         if goal_model_path is None:
             raise ValueError("Goal model path must be provided when goal_source='goal_inference'")
-        goal_model, goal_trained_state = load_pretrained_goal_model(goal_model_path, config.goal_inference.obs_input_type)
-        print(f"✓ Goal inference model loaded successfully")
+        
+        # Custom goal inference model loading for 10-agent compatibility
+        if config.game.N_agents > 10:
+            print(f"Custom loading goal inference model for 10-agent compatibility...")
+            import pickle
+            import flax.serialization
+            
+            # Load the goal inference model bytes
+            with open(goal_model_path, 'rb') as f:
+                goal_model_bytes = pickle.load(f)
+            
+            # Create the goal inference model with correct architecture for 10 agents
+            goal_model = GoalInferenceNetwork(
+                hidden_dims=psn_module.goal_inference_hidden_dims,
+                obs_input_type=config.goal_inference.obs_input_type,
+                goal_output_dim=20  # Force 10-agent goal output (10 agents × 2 coordinates = 20)
+            )
+            
+            # Deserialize the goal inference state
+            goal_trained_state = flax.serialization.from_bytes(goal_model, goal_model_bytes)
+            print(f"✓ Goal inference model loaded successfully with custom 10-agent architecture")
+        else:
+            goal_model, goal_trained_state = load_pretrained_goal_model(goal_model_path, config.goal_inference.obs_input_type)
+            print(f"✓ Goal inference model loaded successfully")
     
     if not use_baseline:
         # Load PSN model only when not using baseline
         print(f"Loading PSN model...")
         if psn_model_path is None:
             raise ValueError("PSN model path must be provided when use_baseline=False")
-        psn_model, psn_trained_state, _, _ = load_trained_models(psn_model_path, None, config.psn.obs_input_type)
-        print(f"✓ PSN model loaded successfully")
+        
+        # Custom model loading for 10-agent compatibility
+        if config.game.N_agents > 10:
+            print(f"Custom loading PSN model for 10-agent compatibility...")
+            import pickle
+            import flax.serialization
+            
+            # Load the PSN model bytes
+            with open(psn_model_path, 'rb') as f:
+                psn_model_bytes = pickle.load(f)
+            
+            # Create the PSN model with correct architecture for 10 agents
+            psn_model = PlayerSelectionNetwork(
+                hidden_dims=psn_module.psn_hidden_dims, 
+                obs_input_type=config.psn.obs_input_type,
+                mask_output_dim=9  # Force 10-agent mask output
+            )
+            
+            # Deserialize the PSN state
+            psn_trained_state = flax.serialization.from_bytes(psn_model, psn_model_bytes)
+            print(f"✓ PSN model loaded successfully with custom 10-agent architecture")
+        else:
+            psn_model, psn_trained_state, _, _ = load_trained_models(psn_model_path, None, config.psn.obs_input_type)
+            print(f"✓ PSN model loaded successfully")
     else:
         print(f"Using baseline method: {baseline_mode}")
         print(f"✓ Baseline mode configured")
@@ -1343,7 +1571,7 @@ def run_receding_horizon_testing(psn_model_path: str = None,
     # Select samples based on configuration
     if config.testing.receding_horizon.use_later_samples:
         # Use specific test samples (samples 512-575)
-        test_start_id = 512
+        test_start_id = 0
         test_end_id = test_start_id + num_samples  # 512 + 64 = 576
         test_samples = reference_data[test_start_id:test_end_id]
         print(f"Using test samples {test_start_id}-{test_end_id-1} ({len(test_samples)} samples)")
@@ -1501,9 +1729,21 @@ if __name__ == "__main__":
     psn_model_path = None
     goal_model_path = None
     
+    # Determine effective number of agents for model selection
+    # If N_agents > 10, we'll use nearest neighbor selection and need 10-agent models
+    effective_n_agents = 10 if config.game.N_agents > 10 else config.game.N_agents
+    
+    if config.game.N_agents > 10:
+        print(f"Model Selection Strategy:")
+        print(f"  Original scenario: {config.game.N_agents} agents")
+        print(f"  Using nearest neighbor selection to reduce to 10 agents")
+        print(f"  Loading 10-agent models (goal inference + PSN)")
+        print()
+        
+    
     # Set goal model path if goal source is goal_inference (regardless of baseline mode)
     if goal_source == "goal_inference":
-        goal_model_path = f"log/goal_inference_rh_gru_{config.goal_inference.obs_input_type}_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_rh_best_model.pkl"
+        goal_model_path = f"log/goal_inference_rh_gru_{config.goal_inference.obs_input_type}_N_{effective_n_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.goal_inference.learning_rate}_bs_{config.goal_inference.batch_size}_goal_loss_weight_{config.goal_inference.goal_loss_weight}_epochs_{config.goal_inference.num_epochs}/goal_inference_rh_best_model.pkl"
         
         # Check if goal model exists
         if not os.path.exists(goal_model_path):
@@ -1522,7 +1762,7 @@ if __name__ == "__main__":
         else:  # prediction_test
             model_name = f"psn_gru_{obs_input_type}_true_goals"
         
-        psn_model_path = f"log/goal_true_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/{model_name}_N_{config.game.N_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
+        psn_model_path = f"log/goal_true_N_{effective_n_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}/{model_name}_N_{effective_n_agents}_T_{config.game.T_total}_obs_{config.goal_inference.observation_length}_lr_{config.psn.learning_rate}_bs_{config.psn.batch_size}_sigma1_{config.psn.sigma1}_sigma2_{config.psn.sigma2}_epochs_{config.psn.num_epochs}/psn_best_model.pkl"
         
         # Check if PSN model exists
         if not os.path.exists(psn_model_path):
@@ -1539,10 +1779,11 @@ if __name__ == "__main__":
         method_name = baseline_mode.lower().replace(' ', '_').replace('_', '')
         
         # Create directory structure: baseline_results/test_type/N_agents/method_param_goal_source
+        # Use original N_agents for directory naming (to distinguish different scenarios)
         n_agents = config.game.N_agents
         baseline_param = config.testing.receding_horizon.baseline_parameter
         goal_suffix = "goal_inference" if goal_source == "goal_inference" else "goal_true"
-        output_dir = f"baseline_results/{test_type}/N_{n_agents}/receding_horizon_results_{method_name}_param_{baseline_param}_{goal_suffix}"
+        output_dir = f"baseline_results/{test_type}/N_{n_agents}/receding_horizon_results_{n_agents}_{method_name}_param_{baseline_param}_{goal_suffix}"
     else:
         # For PSN model, create directory under the PSN model directory with method name
         psn_model_dir = os.path.dirname(psn_model_path)
@@ -1560,14 +1801,17 @@ if __name__ == "__main__":
         else:  # rank
             method_suffix = f"rank_{config.testing.receding_horizon.rank}"
         
+        # Get the total number of agents for directory naming
+        n_agents = config.game.N_agents
+        
         if goal_source == "true_goals":
-            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_{test_type}_goal_true_{obs_type}_{method_suffix}_{psn_model_name}")
+            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_{n_agents}_{test_type}_goal_true_{obs_type}_{method_suffix}_{psn_model_name}")
         elif goal_source == "goal_inference":
             # Always use first_steps for goal inference
-            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_{test_type}_goal_inference_{obs_type}_{method_suffix}_{psn_model_name}")
+            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_{n_agents}_{test_type}_goal_inference_{obs_type}_{method_suffix}_{psn_model_name}")
         else:
             # Fallback to original directory name with method name
-            output_dir = os.path.join(psn_model_dir, f"{config.testing.receding_horizon.output_dir}_{test_type}_{obs_type}_{method_suffix}_{psn_model_name}")
+            output_dir = os.path.join(psn_model_dir, f"receding_horizon_results_{n_agents}_{test_type}_{obs_type}_{method_suffix}_{psn_model_name}")
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -1591,6 +1835,7 @@ if __name__ == "__main__":
     print(f"  Use Later Samples: {config.testing.receding_horizon.use_later_samples}")
     print(f"  Results will be saved to: {output_dir}")
     
+    
     # Run testing
     results = run_receding_horizon_testing(
         psn_model_path=psn_model_path,
@@ -1603,6 +1848,13 @@ if __name__ == "__main__":
         test_type=test_type,
         goal_source=goal_source
     )
+    
+    # Restore original N_agents if it was modified for nearest neighbor selection
+    if config.game.N_agents > 10:
+        import psn_training_with_pretrained_goals as psn_module
+        # Restore to original value (20 in this case)
+        psn_module.N_agents = 20
+        print(f"Restored global N_agents to 20")
     
     # Create summary file explaining the model relationships
     summary_path = os.path.join(output_dir, "test_summary.txt")

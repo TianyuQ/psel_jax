@@ -34,7 +34,7 @@ game:
   T_observation: 10         # Number of steps to observe before solving the game
 
   # Agent configuration
-  N_agents: 4               # Total number of agents in the game
+  N_agents: 20               # Total number of agents in the game
   ego_agent_id: 0           # ID of the ego agent (usually 0)
   
   # State and control dimensions
@@ -63,12 +63,12 @@ optimization:
 # ============================================================================
 reference_generation:
   # Data generation parameters
-  num_samples: 64           # Number of reference trajectory samples to generate
+  num_samples: 40           # Number of reference trajectory samples to generate
   save_dir: "reference_trajectories_${N_agents}p"  # Directory to save reference trajectories
   
   # Data split configuration
-  train_samples: 384         # Number of samples to use for training (first N samples)
-  test_samples: 128          # Number of samples to use for testing (later N samples)
+  train_samples: 0         # Number of samples to use for training (first N samples)
+  test_samples: 0          # Number of samples to use for testing (later N samples)
   
   # Trajectory type
   trajectory_type: "linear" # Type of reference trajectory ["linear", "spline", "polynomial"]
@@ -111,7 +111,7 @@ goal_inference:
   observation_length: 10    # Length of observation history (K_observation)
   
   # Observation input options
-  obs_input_type: "partial"    # Observation input type ["full", "partial"]
+  obs_input_type: "full"    # Observation input type ["full", "partial"]
   # - "full": Use full state (x, y, vx, vy) - 4 dimensions per agent
   # - "partial": Use position only (x, y) - 2 dimensions per agent
   
@@ -150,7 +150,7 @@ psn:
   use_true_goals: true     # Whether to use true goals instead of predicted goals from goal inference model
   
   # Observation input options
-  obs_input_type: "partial"    # Observation input type ["full", "partial"]
+  obs_input_type: "full"    # Observation input type ["full", "partial"]
   # - "full": Use full state (x, y, vx, vy) - 4 dimensions per agent
   # - "partial": Use position only (x, y) - 2 dimensions per agent
   
@@ -248,7 +248,7 @@ testing:
     # 1b. prediction_test + goal_inference: Use inferred goals for all agents  
     # 2a. planning_test + true_goals: Use true goals for all agents
     # 2b. planning_test + goal_inference: Ego agent uses true goals, other agents use inferred goals
-    goal_source: "goal_inference"            # ["true_goals", "goal_inference"]
+    goal_source: "true_goals"            # ["true_goals", "goal_inference"]
     
     # Two-phase approach configuration
     initial_stabilization_iterations: 0  # No stabilization period - use PSN and goal inference from step 10
@@ -258,19 +258,19 @@ testing:
     # - "threshold": Select agents with mask values > mask_threshold (default behavior)
     # - "rank": Select top N agents based on mask values (rank = N means select N-1 other agents)
     # Note: Baseline methods use their own internal selection logic and ignore these parameters
-    selection_method: "rank"        # ["threshold", "rank"] - only for PSN methods
+    selection_method: "threshold"        # ["threshold", "rank"] - only for PSN methods
     mask_threshold: 0.5                  # Threshold for agent selection when using "threshold" method
-    rank: 2                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
+    rank: 3                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
     
     # Testing configuration
-    num_samples: 64                     # Number of samples to test (use later 128 samples)
+    num_samples: 40                     # Number of samples to test (use later 128 samples)
     use_later_samples: true              # Whether to use later samples (samples 384-511) instead of first samples
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Baseline testing configuration
     use_baseline: false                  # Whether to use baseline methods instead of PSN model
-    baseline_mode: "All"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
-    baseline_parameter: 2                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
+    baseline_mode: "Cost Evolution"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
+    baseline_parameter: 3                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
     
     # Evaluation metrics configuration - automatically set based on test_type
     # prediction_test: compute_prediction_metrics=true, compute_planning_metrics=true
