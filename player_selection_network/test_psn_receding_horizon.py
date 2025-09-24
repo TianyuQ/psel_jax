@@ -1274,33 +1274,10 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         else:
             results['consistency_metric'] = 0.0
         
-        # Compute summary statistics
-        goal_rmse_values = []
-        mask_sparsity_values = []
-        num_selected_values = []
-        
-        for iter_result in results['receding_horizon_results']:
-            # Goal RMSE
-            pred_goals = jnp.array(iter_result['predicted_goals'])
-            true_goals = jnp.array(iter_result['true_goals'])
-            
-            # Handle shape mismatch for per-iteration nearest neighbor selection
-            if pred_goals.shape != true_goals.shape:
-                # Use the minimum shape to avoid broadcasting errors
-                min_agents = min(pred_goals.shape[0], true_goals.shape[0])
-                pred_goals = pred_goals[:min_agents]
-                true_goals = true_goals[:min_agents]
-            
-            goal_rmse = jnp.sqrt(jnp.mean(jnp.square(pred_goals - true_goals)))
-            goal_rmse_values.append(float(goal_rmse))
-            
-            # Mask statistics
-            mask_sparsity_values.append(iter_result['mask_sparsity'])
-            num_selected_values.append(iter_result['num_selected'])
-        
-        results['goal_rmse'] = float(np.mean(goal_rmse_values))
-        results['mask_sparsity'] = float(np.mean(mask_sparsity_values))
-        results['num_selected_agents'] = float(np.mean(num_selected_values))
+        # Store basic statistics for analysis script
+        results['goal_rmse'] = 0.0  # Will be computed by analysis script
+        results['mask_sparsity'] = 0.0  # Will be computed by analysis script
+        results['num_selected_agents'] = 0.0  # Will be computed by analysis script
         
         # Compute mean computation time
         results['mean_computation_time'] = float(np.mean(results['computation_times']))
@@ -1318,27 +1295,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
     results['sample_computation_time'] = sample_end_time - sample_start_time
     
     print(f"    ✓ Completed receding horizon planning with models")
-    print(f"    ✓ Goal RMSE: {results['goal_rmse']:.4f}")
-    print(f"    ✓ Mask Sparsity: {results['mask_sparsity']:.2f}")
-    print(f"    ✓ Selected Agents: {results['num_selected_agents']:.1f}")
-    print(f"    ✓ Consistency Metric: {results['consistency_metric']:.4f}")
-    print(f"    ✓ Mean Computation Time per Receding Horizon Step: {results['mean_computation_time']:.4f}s")
-    print(f"    ✓ Total Computation Time per Sample: {results['sample_computation_time']:.4f}s")
-    
-    # Print prediction metrics (steps 10-50 only)
-    if results['prediction_metrics']:
-        print(f"    ✓ Prediction Metrics (steps {T_observation}-{T_total}):")
-        print(f"        ADE: {results['prediction_metrics'].get('ade', float('inf')):.4f}")
-        print(f"        FDE: {results['prediction_metrics'].get('fde', float('inf')):.4f}")
-    
-    # Print planning metrics (steps 10-50 only)
-    if results['planning_metrics']:
-        print(f"    ✓ Planning Metrics (steps {T_observation}-{T_total}):")
-        print(f"        Navigation Cost: {results['planning_metrics'].get('navigation_cost', float('inf')):.4f}")
-        print(f"        Safety Cost: {results['planning_metrics'].get('safety_cost', float('inf')):.4f}")
-        print(f"        Control Cost: {results['planning_metrics'].get('control_cost', float('inf')):.4f}")
-        print(f"        Trajectory Length: {results['planning_metrics'].get('trajectory_length', float('inf')):.4f}")
-        print(f"        Trajectory Smoothness: {results['planning_metrics'].get('trajectory_smoothness', float('inf')):.4f}")
+    print(f"    ✓ Sample computation time: {results['sample_computation_time']:.4f}s")
     
     # Store normalized data for GIF creation
     results['normalized_sample_data'] = normalized_sample_data
@@ -1596,62 +1553,13 @@ def run_receding_horizon_testing(psn_model_path: str = None,
         
         all_results.append(results)
     
-    # Print summary
+    # Print basic completion message
     print(f"\n" + "=" * 80)
-    print("TESTING SUMMARY")
+    print("TESTING COMPLETED")
     print("=" * 80)
     print(f"Successfully tested: {len(all_results)}/{len(test_samples)} samples")
-    
-    if all_results:
-        goal_rmse_values = [r['goal_rmse'] for r in all_results if r['goal_rmse'] != float('inf')]
-        mask_sparsity_values = [r['mask_sparsity'] for r in all_results]
-        num_selected_values = [r['num_selected_agents'] for r in all_results]
-        consistency_values = [r['consistency_metric'] for r in all_results]
-        computation_times = [r['mean_computation_time'] for r in all_results if r['mean_computation_time'] > 0]
-        
-        if goal_rmse_values:
-            print(f"Goal Prediction RMSE: {np.mean(goal_rmse_values):.4f} ± {np.std(goal_rmse_values):.4f}")
-        print(f"Mask Sparsity: {np.mean(mask_sparsity_values):.3f} ± {np.std(mask_sparsity_values):.3f}")
-        print(f"Average Selected Agents: {np.mean(num_selected_values):.2f} ± {np.std(num_selected_values):.2f}")
-        print(f"Consistency Metric: {np.mean(consistency_values):.4f} ± {np.std(consistency_values):.4f}")
-        if computation_times:
-            print(f"Mean Computation Time per Receding Horizon Step: {np.mean(computation_times):.4f}s ± {np.std(computation_times):.4f}s")
-        
-        # Per-sample computation times
-        sample_computation_times = [r['sample_computation_time'] for r in all_results if r['sample_computation_time'] > 0]
-        if sample_computation_times:
-            print(f"Mean Computation Time per Sample: {np.mean(sample_computation_times):.4f}s ± {np.std(sample_computation_times):.4f}s")
-        
-        # Print prediction metrics summary (steps 10-50 only)
-        if config.testing.receding_horizon.compute_prediction_metrics:
-            ade_values = [r['prediction_metrics'].get('ade', float('inf')) for r in all_results if r['prediction_metrics'].get('ade', float('inf')) != float('inf')]
-            fde_values = [r['prediction_metrics'].get('fde', float('inf')) for r in all_results if r['prediction_metrics'].get('fde', float('inf')) != float('inf')]
-            
-            if ade_values:
-                print(f"ADE (steps {T_observation}-{T_total}): {np.mean(ade_values):.4f} ± {np.std(ade_values):.4f}")
-            if fde_values:
-                print(f"FDE (steps {T_observation}-{T_total}): {np.mean(fde_values):.4f} ± {np.std(fde_values):.4f}")
-        
-        # Print planning metrics summary (steps 10-50 only)
-        if config.testing.receding_horizon.compute_planning_metrics:
-            nav_cost_values = [r['planning_metrics'].get('navigation_cost', float('inf')) for r in all_results if r['planning_metrics'].get('navigation_cost', float('inf')) != float('inf')]
-            safety_cost_values = [r['planning_metrics'].get('safety_cost', float('inf')) for r in all_results if r['planning_metrics'].get('safety_cost', float('inf')) != float('inf')]
-            control_cost_values = [r['planning_metrics'].get('control_cost', float('inf')) for r in all_results if r['planning_metrics'].get('control_cost', float('inf')) != float('inf')]
-            trajectory_length_values = [r['planning_metrics'].get('trajectory_length', float('inf')) for r in all_results if r['planning_metrics'].get('trajectory_length', float('inf')) != float('inf')]
-            trajectory_smoothness_values = [r['planning_metrics'].get('trajectory_smoothness', float('inf')) for r in all_results if r['planning_metrics'].get('trajectory_smoothness', float('inf')) != float('inf')]
-            
-            if nav_cost_values:
-                print(f"Navigation Cost (steps {T_observation}-{T_total}): {np.mean(nav_cost_values):.4f} ± {np.std(nav_cost_values):.4f}")
-            if safety_cost_values:
-                print(f"Safety Cost (steps {T_observation}-{T_total}): {np.mean(safety_cost_values):.4f} ± {np.std(safety_cost_values):.4f}")
-            if control_cost_values:
-                print(f"Control Cost (steps {T_observation}-{T_total}): {np.mean(control_cost_values):.4f} ± {np.std(control_cost_values):.4f}")
-            if trajectory_length_values:
-                print(f"Trajectory Length (steps {T_observation}-{T_total}): {np.mean(trajectory_length_values):.4f} ± {np.std(trajectory_length_values):.4f}")
-            if trajectory_smoothness_values:
-                print(f"Trajectory Smoothness (steps {T_observation}-{T_total}): {np.mean(trajectory_smoothness_values):.4f} ± {np.std(trajectory_smoothness_values):.4f}")
-    
     print(f"Results saved to: {output_dir}")
+    print(f"Use 'python player_selection_network/test_analysis.py' to analyze results")
     
     return all_results
 
@@ -1885,55 +1793,7 @@ if __name__ == "__main__":
         f.write(f"  - Successfully tested: {len(results)} samples\n")
         f.write(f"  - Output directory: {output_dir}\n\n")
         
-        # Add metrics summary if available (steps 10-50 only)
-        if results:
-            f.write("Metrics Summary (steps 10-50, receding horizon planning phase only):\n")
-            # Prediction metrics
-            if config.testing.receding_horizon.compute_prediction_metrics:
-                ade_values = [r['prediction_metrics'].get('ade', float('inf')) for r in results if r['prediction_metrics'].get('ade', float('inf')) != float('inf')]
-                fde_values = [r['prediction_metrics'].get('fde', float('inf')) for r in results if r['prediction_metrics'].get('fde', float('inf')) != float('inf')]
-                if ade_values:
-                    f.write(f"  - ADE (steps {T_observation}-{T_total}): {np.mean(ade_values):.4f} ± {np.std(ade_values):.4f}\n")
-                if fde_values:
-                    f.write(f"  - FDE (steps {T_observation}-{T_total}): {np.mean(fde_values):.4f} ± {np.std(fde_values):.4f}\n")
-            
-            # Planning metrics
-            if config.testing.receding_horizon.compute_planning_metrics:
-                nav_cost_values = [r['planning_metrics'].get('navigation_cost', float('inf')) for r in results if r['planning_metrics'].get('navigation_cost', float('inf')) != float('inf')]
-                safety_cost_values = [r['planning_metrics'].get('safety_cost', float('inf')) for r in results if r['planning_metrics'].get('safety_cost', float('inf')) != float('inf')]
-                control_cost_values = [r['planning_metrics'].get('control_cost', float('inf')) for r in results if r['planning_metrics'].get('control_cost', float('inf')) != float('inf')]
-                trajectory_length_values = [r['planning_metrics'].get('trajectory_length', float('inf')) for r in results if r['planning_metrics'].get('trajectory_length', float('inf')) != float('inf')]
-                trajectory_smoothness_values = [r['planning_metrics'].get('trajectory_smoothness', float('inf')) for r in results if r['planning_metrics'].get('trajectory_smoothness', float('inf')) != float('inf')]
-                if nav_cost_values:
-                    f.write(f"  - Navigation Cost (steps {T_observation}-{T_total}): {np.mean(nav_cost_values):.4f} ± {np.std(nav_cost_values):.4f}\n")
-                if safety_cost_values:
-                    f.write(f"  - Safety Cost (steps {T_observation}-{T_total}): {np.mean(safety_cost_values):.4f} ± {np.std(safety_cost_values):.4f}\n")
-                if control_cost_values:
-                    f.write(f"  - Control Cost (steps {T_observation}-{T_total}): {np.mean(control_cost_values):.4f} ± {np.std(control_cost_values):.4f}\n")
-                if trajectory_length_values:
-                    f.write(f"  - Trajectory Length (steps {T_observation}-{T_total}): {np.mean(trajectory_length_values):.4f} ± {np.std(trajectory_length_values):.4f}\n")
-                if trajectory_smoothness_values:
-                    f.write(f"  - Trajectory Smoothness (steps {T_observation}-{T_total}): {np.mean(trajectory_smoothness_values):.4f} ± {np.std(trajectory_smoothness_values):.4f}\n")
-            
-            # Consistency metric
-            consistency_values = [r['consistency_metric'] for r in results if r['consistency_metric'] is not None]
-            if consistency_values:
-                f.write(f"  - Consistency Metric: {np.mean(consistency_values):.4f} ± {np.std(consistency_values):.4f}\n")
-            
-            # Mean number of selected agents
-            num_selected_values = [r['num_selected_agents'] for r in results if r['num_selected_agents'] is not None]
-            if num_selected_values:
-                f.write(f"  - Average Selected Agents: {np.mean(num_selected_values):.2f} ± {np.std(num_selected_values):.2f}\n")
-            
-            # Computation time
-            computation_times = [r['mean_computation_time'] for r in results if r['mean_computation_time'] > 0]
-            if computation_times:
-                f.write(f"  - Mean Computation Time per Receding Horizon Step: {np.mean(computation_times):.4f}s ± {np.std(computation_times):.4f}s\n")
-            
-            # Per-sample computation time
-            sample_computation_times = [r['sample_computation_time'] for r in results if r['sample_computation_time'] > 0]
-            if sample_computation_times:
-                f.write(f"  - Mean Computation Time per Sample: {np.mean(sample_computation_times):.4f}s ± {np.std(sample_computation_times):.4f}s\n")
+        f.write(f"\nNote: Use 'python player_selection_network/test_analysis.py' for detailed statistics analysis.\n")
         
         f.write("\nDirectory Structure:\n")
         if not use_baseline:
@@ -1953,15 +1813,5 @@ if __name__ == "__main__":
     print(f"Generated {len(results)} test results with integrated models.")
     print(f"Results saved to: {output_dir}")
     print(f"Summary file: {summary_path}")
-    print(f"\nDirectory organization:")
-    if use_baseline:
-        print(f"  Baseline Results → {test_type} → N_{n_agents} → {os.path.basename(output_dir)}")
-        print(f"  Method: {baseline_mode}")
-        print(f"  Parameter: {baseline_param}")
-        print(f"  Goal Source: {goal_source}")
-    else:
-        print(f"  Goal Inference → PSN Training → Receding Horizon Test")
-        if goal_model_path and psn_model_path:
-            print(f"  {os.path.basename(os.path.dirname(goal_model_path))} → {os.path.basename(os.path.dirname(psn_model_path))} → {os.path.basename(output_dir)}")
-        else:
-            print(f"  Models → {os.path.basename(output_dir)}")
+    print(f"\nTo analyze results, run:")
+    print(f"  python player_selection_network/test_analysis.py")
