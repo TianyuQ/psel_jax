@@ -1059,16 +1059,17 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
             if use_baseline:
                 # Use baseline method
                 mode_parameter = config.testing.receding_horizon.baseline_parameter
-                trajectory_history = [np.array(current_game_state["trajectories"][f"agent_{i}"]["states"]) for i in range(n_agents_effective)]
+                # For baseline methods, use all agents (not just n_agents_effective)
+                trajectory_history = [np.array(current_game_state["trajectories"][f"agent_{i}"]["states"]) for i in range(n_agents)]
                 
                 
                 if iteration > config.testing.receding_horizon.initial_stabilization_iterations:
                     prev_controls = [np.array(c) for c in results['receding_horizon_results'][-1]['first_controls']]
                 else:
-                    prev_controls = [np.zeros(2) for _ in range(n_agents_effective)]
+                    prev_controls = [np.zeros(2) for _ in range(n_agents)]
 
                 # For baseline methods, we need to provide input in (batch_size, T_observation, n_agents, state_dim) format
-                obs_input_baseline = obs_array.reshape(1, T_observation, n_agents_effective, state_dim)
+                obs_input_baseline = obs_array.reshape(1, T_observation, n_agents, state_dim)
                 
                 predicted_mask = baseline_selection(
                     input_traj=obs_input_baseline,
@@ -1099,7 +1100,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                 # Baseline method: use simple threshold (baseline already returns binary mask)
                 selected_agents = jnp.where(predicted_mask > 0.5)[0]  # Baseline returns 0/1 values
                 num_selected = len(selected_agents)
-                mask_sparsity = num_selected / (n_agents_effective - 1)
+                mask_sparsity = num_selected / (n_agents - 1)
         
         # Step 3: Solve receding horizon game with predicted goals
         # Apply masking: only include selected agents (EXACTLY like training script)
@@ -1231,8 +1232,9 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         ego_ground_truth_analysis = ego_ground_truth_trajectory[analysis_start_step:analysis_end_step]
         
         # Extract other agent ground truth trajectories for analysis period
+        # Use ALL agents from the original scenario, not just the ones that participated in game solving
         other_ground_truth_trajectories = []
-        for i in range(n_agents_effective):
+        for i in range(n_agents):
             if i != ego_agent_id:
                 other_traj = jnp.array(normalized_sample_data["trajectories"][f"agent_{i}"]["states"])
                 other_traj_analysis = other_traj[analysis_start_step:analysis_end_step]
@@ -1266,7 +1268,18 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
         masks = []
         for iter_result in results['receding_horizon_results']:
             if 'predicted_mask' in iter_result and iter_result['predicted_mask'] is not None:
-                masks.append(jnp.array(iter_result['predicted_mask']))
+                mask = jnp.array(iter_result['predicted_mask'])
+                
+                # For PSN methods, pad the mask with zeros for agents not considered by the model
+                # This ensures consistency is computed on the same scale (all agents) for fair comparison
+                if not use_baseline and len(mask) < (n_agents - 1):
+                    # Pad with zeros for agents not considered by PSN model
+                    padded_mask = jnp.zeros(n_agents - 1)
+                    padded_mask = padded_mask.at[:len(mask)].set(mask)
+                    masks.append(padded_mask)
+                else:
+                    # For baseline methods or when mask already has correct length
+                    masks.append(mask)
         
         if len(masks) > 0:
             consistency = compute_consistency_metric(masks, T_observation)

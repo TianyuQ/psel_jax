@@ -36,15 +36,19 @@ def compute_minimum_distance_ego_others(ego_trajectory: np.ndarray,
     if not other_trajectories:
         return float('inf')
     
-    T = len(ego_trajectory)
-    ego_positions = ego_trajectory[:, :2]  # (T, 2) - only position coordinates
+    T_ego = len(ego_trajectory)
+    ego_positions = ego_trajectory[:, :2]  # (T_ego, 2) - only position coordinates
     
     min_distances = []
     for other_traj in other_trajectories:
-        if len(other_traj) >= T:
-            other_positions = other_traj[:T, :2]  # (T, 2) - only position coordinates
+        T_other = len(other_traj)
+        # Use the minimum length to ensure both trajectories have the same length
+        T_min = min(T_ego, T_other)
+        if T_min > 0:
+            ego_pos_trimmed = ego_positions[:T_min, :]  # (T_min, 2)
+            other_positions = other_traj[:T_min, :2]    # (T_min, 2) - only position coordinates
             # Compute distances at each time step
-            distances = np.linalg.norm(ego_positions - other_positions, axis=1)
+            distances = np.linalg.norm(ego_pos_trimmed - other_positions, axis=1)
             # Find minimum distance for this agent
             min_distances.append(np.min(distances))
     
@@ -289,7 +293,16 @@ def compute_sample_statistics(sample_data: Dict[str, Any]) -> Dict[str, float]:
     stats['use_baseline'] = sample_data.get('use_baseline', False)
     stats['baseline_mode'] = sample_data.get('baseline_mode', None)
     stats['goal_source'] = sample_data.get('goal_source', 'unknown')
-    stats['test_type'] = 'prediction_test' if sample_data.get('goal_source') == 'true_goals' else 'planning_test'
+    # Determine test type based on the data structure and content
+    # Planning tests have planning_metrics and final_game_state
+    # Prediction tests have prediction_metrics but no planning_metrics
+    if 'planning_metrics' in sample_data and 'final_game_state' in sample_data:
+        stats['test_type'] = 'planning_test'
+    elif 'prediction_metrics' in sample_data:
+        stats['test_type'] = 'prediction_test'
+    else:
+        # Fallback: check if use_baseline is False (usually indicates planning test)
+        stats['test_type'] = 'planning_test' if not sample_data.get('use_baseline', True) else 'prediction_test'
     
     # Extract receding horizon results
     receding_horizon_results = sample_data.get('receding_horizon_results', [])
@@ -364,15 +377,20 @@ def compute_sample_statistics(sample_data: Dict[str, Any]) -> Dict[str, float]:
     
     # Compute minimum distance for planning tests
     if stats['test_type'] == 'planning_test':
-        # Extract ego trajectory and other agent trajectories from final game state
+        # Extract ego trajectory from final game state (computed trajectory)
         final_game_state = sample_data.get('final_game_state', {})
         if final_game_state and 'trajectories' in final_game_state:
-            # Get ego agent trajectory (agent_0)
+            # Get ego agent trajectory (agent_0) - this is the computed trajectory
             ego_trajectory = np.array(final_game_state['trajectories'].get('agent_0', {}).get('states', []))
             
-            # Get other agent trajectories
+            # Get other agent trajectories from original sample data (all agents for fair comparison)
             other_trajectories = []
-            for agent_key, agent_data in final_game_state['trajectories'].items():
+            # The original trajectory data is stored in normalized_sample_data.trajectories
+            normalized_data = sample_data.get('normalized_sample_data', {})
+            original_trajectories = normalized_data.get('trajectories', {})
+            
+            # Extract trajectories for all other agents from original data
+            for agent_key, agent_data in original_trajectories.items():
                 if agent_key != 'agent_0':  # Skip ego agent
                     other_traj = np.array(agent_data.get('states', []))
                     if len(other_traj) > 0:

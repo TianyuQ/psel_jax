@@ -258,7 +258,7 @@ testing:
     # - "threshold": Select agents with mask values > mask_threshold (default behavior)
     # - "rank": Select top N agents based on mask values (rank = N means select N-1 other agents)
     # Note: Baseline methods use their own internal selection logic and ignore these parameters
-    selection_method: "threshold"        # ["threshold", "rank"] - only for PSN methods
+    selection_method: "rank"        # ["threshold", "rank"] - only for PSN methods
     mask_threshold: 0.5                  # Threshold for agent selection when using "threshold" method
     rank: 3                              # Number of total agents when using "rank" method (rank=3 means 3-player game, i.e., select 2 other agents)
     
@@ -268,9 +268,9 @@ testing:
     output_dir: "receding_horizon_test_results"  # Test results will be placed under the PSN model directory
     
     # Baseline testing configuration
-    use_baseline: true                  # Whether to use baseline methods instead of PSN model
-    baseline_mode: "Distance Threshold"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
-    baseline_parameter: 1.5                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
+    use_baseline: false                  # Whether to use baseline methods instead of PSN model
+    baseline_mode: "nearest neighbor"    # Baseline method ["All", "Distance Threshold", "Nearest Neighbor", "Jacobian", "Hessian", "Cost Evolution", "Barrier Function", "Control Barrier Function"]
+    baseline_parameter: 2                # Parameter for baseline method (e.g., number of players (including ego), distance threshold)
     
     # Evaluation metrics configuration - automatically set based on test_type
     # prediction_test: compute_prediction_metrics=true, compute_planning_metrics=true
@@ -279,7 +279,7 @@ testing:
     compute_planning_metrics: true       # Whether to compute planning metrics (nav_cost, safety_cost, control_cost) - always true
     
     # Visualization settings
-    create_gif: true                     # Whether to create trajectory GIFs
+    create_gif: false                     # Whether to create trajectory GIFs
     gif_duration: 0.5                    # Duration per frame in seconds
     gif_loop: 0                          # Number of loops (0 = infinite)
     
