@@ -973,7 +973,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                     goal_obs_traj = extract_observation_trajectory(filtered_sample_data, config.goal_inference.obs_input_type, n_agents_effective)
                     goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
                     
-                    inferred_goals = goal_model.apply({'params': goal_trained_state['params']}, goal_obs_input, deterministic=True)
+                    inferred_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
                     inferred_goals = inferred_goals[0].reshape(n_agents_effective, 2)
                     
                     # Combine: ego agent uses ground truth, others use inferred
@@ -993,7 +993,7 @@ def test_receding_horizon_with_models(sample_data: Dict[str, Any],
                     # Convert to input format for goal inference model
                     goal_obs_input = goal_obs_traj.flatten().reshape(1, -1)
                     
-                    predicted_goals = goal_model.apply({'params': goal_trained_state['params']}, goal_obs_input, deterministic=True)
+                    predicted_goals = goal_model.apply({'params': goal_trained_state.params}, goal_obs_input, deterministic=True)
                     predicted_goals = predicted_goals[0].reshape(n_agents_effective, 2)
                 else:
                     raise ValueError(f"Invalid goal_source: {goal_source}. Must be 'true_goals' or 'goal_inference'")
@@ -1541,7 +1541,7 @@ def run_receding_horizon_testing(psn_model_path: str = None,
     # Select samples based on configuration
     if config.testing.receding_horizon.use_later_samples:
         # Use specific test samples (samples 512-575)
-        test_start_id = 0
+        test_start_id = 512
         test_end_id = test_start_id + num_samples  # 512 + 64 = 576
         test_samples = reference_data[test_start_id:test_end_id]
         print(f"Using test samples {test_start_id}-{test_end_id-1} ({len(test_samples)} samples)")
